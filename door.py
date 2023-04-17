@@ -76,7 +76,7 @@ class Sensor:
             self.SENSOR.display_status()
         self.mf_array.append(mfield)
         self.df_array.append(dfield)
-        log_interval("field", "magnetic field: %s, drirection field %s"%(str(mfield),str(dfield)), interval=20)
+        log_interval("field", "magnetic field = %s, direction=%s x=%s y=%s z=%s"%(str(mfield),str(dfield), MX, MY,MZ), interval=20)
         return mfield,dfield
     def check_div(self, min_length=None):
         lookup_size = min_length if min_length is not None else self.val_lookback
@@ -177,6 +177,7 @@ class Door:
         self.lock = False
 
     def open_door_from_beam(self):
+        log_interval("beam", "beam detected", interval=5, to_file=True)
         self.open_door(source="beam")
 
     def open_door(self, time_to_open=12, source="magnet"):
