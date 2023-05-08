@@ -16,12 +16,22 @@ def log(msg, to_file=True):
         log_file.flush()
     print(_msg)
 type_to_logtime = {}
-def log_interval(type, msg, interval=10.0, to_file=False):
+def log_interval(type, msg, interval=10.0, count = 1, to_file=False):
     if type not in type_to_logtime:
-        type_to_logtime[type] = 0
-    if time.time() - type_to_logtime[type] > interval:
+        type_to_logtime[type] = (0, 0)
+    (last_log_time, cnt) = type_to_logtime[type]
+    current_time = time.time()
+    is_time_ellapsed = current_time - last_log_time > interval
+    is_count_under = cnt<count
+    if is_time_ellapsed or is_count_under:
         log("[%s] %s"%(type, msg), to_file=to_file)
-        type_to_logtime[type] = time.time()
+        if is_time_ellapsed:
+            new_count=0
+            new_time=time.time()
+        else:
+            new_count = cnt +1
+            new_time = last_log_time
+        type_to_logtime[type] = (new_time, new_count)
 class Relay:
     def __init__(self, pin, inverted=False):
         self.pin = pin
@@ -141,6 +151,8 @@ class Door:
         if verbose:
             log_interval("magnet_change", "magnet changes detected: magnitude= %s , dir=%s"%(m_change, d_change), interval=1.5, to_file=False)
         if abs(m_change) > 8 or abs(d_change) > 8:
+            log_interval("magnet_detect", "magnet detected: m_change=%s, d_change=%s magnitude= %s , dir=%s"%(str(m_change), str(d_change), m_change, d_change),
+                         interval=5, count=3, to_file=True)
             return True
         return False
 
@@ -159,6 +171,7 @@ class Door:
         if not self.open or self.lock:
             return
         log("door closing")
+        start_time = time.time()
         self.lock=True
         self.open = False
         self.direction.trig(False)
@@ -167,20 +180,15 @@ class Door:
         self.motor.trig(False)
         self.direction.trig(True)
         self.closed_time = time.time()
-        (m2, d2) = self.sensor.read_sensor()
-        ##reset sensor base this way, by reading for a bit - This is b/c door moves disturb sensor
-        for i in range(10):
-            self.sensor.read_sensor()
-            time.sleep(.05)
-        self.reset_sensor_if_stable(m2, d2, 8, force_log=True)
-        log("door closed")
+        self.post_door_reset_sensor()
         self.lock = False
+        log("door closed")
 
     def open_door_from_beam(self):
         log_interval("beam", "beam detected", interval=5, to_file=True)
         self.open_door(source="beam")
 
-    def open_door(self, time_to_open=12, source="magnet"):
+    def open_door(self, time_to_open=13, source="magnet"):
         if self.open or self.lock:
             return
         log("door opening source =%s" %source)
@@ -192,18 +200,30 @@ class Door:
         self.motor.trig(False)
         log("door opened source=%s" %source)
         self.open_time = time.time()
+        #self.post_door_reset_sensor()
+
         self.lock = False
+    def post_door_reset_sensor(self):
+        (m2, d2) = self.sensor.read_sensor()
+        ##reset sensor base this way, by reading for a bit - This is b/c door moves disturb sensor
+        for i in range(10):
+            self.sensor.read_sensor()
+            time.sleep(.05)
+        self.reset_sensor_if_stable(m2, d2, 8, force_log=True)
+
 
 
     def read_sensor_thread(self):
         while True:
-            if self.open and time.time() - self.open_time > self.open_min_time:
-                if self.magnet_wait_detect(3, .2, verbose=True) == 0 and not self.beam.is_broken():
+            if self.lock:
+                pass
+            elif self.open and time.time() - self.open_time > self.open_min_time:
+                if self.magnet_wait_detect(min_check = 3, interval= .2, verbose=True) == 0 and not self.beam.is_broken():
                     self.close_door()
                 else:
                     log_interval("magnet_detect", "magnet still detected", interval=1.5, to_file=False)
             else:
-                is_magnet = self.magnet_wait_detect(3, .1) == 1
+                is_magnet = self.magnet_wait_detect(min_check = 2, interval= .1) == 1
                 if is_magnet and not self.open:
                     if self.cool_down_time < time.time() - self.closed_time:
                         self.open_door()
