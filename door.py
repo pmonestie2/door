@@ -106,7 +106,6 @@ class Sensor:
         self.SENSOR = adafruit_mlx90393.MLX90393(self.i2c, gain=adafruit_mlx90393.GAIN_2X)
         self.SENSOR.display_status()
         self.value_lookback = deque(maxlen=val_lookback)
-        self.df_array = deque(maxlen=val_lookback)
         self.avg = None
         self.avg_norm = None
         self.magnet = False
@@ -162,9 +161,10 @@ class Sensor:
         #if True:
         #    return (0.0,0.0)
         v1=self.avg
+        norm1 = self.avg_norm
+
         v2 = np.array([sensorData.x, sensorData.y, sensorData.z])
         norm2 = np.linalg.norm(v2)
-        norm1 = self.avg_norm
 
         pc_norm = abs(100 * (norm2 - norm1) / norm1)
         csm = np.dot(v1, v2) / (norm1 * norm2)
@@ -199,11 +199,6 @@ class Sensor:
                 else:
                     self.magnet=False
             time.sleep(.08)
-
-    def clear(self):
-        self.value_lookback.clear()
-        self.df_array.clear()
-
 
 
 class Door:
