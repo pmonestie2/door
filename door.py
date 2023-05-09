@@ -28,7 +28,7 @@ def log(msg, to_file=True):
         log_file.flush()
     print(_msg)
 
-    
+
 type_to_logtime = {}
 def silence(type):
     type_to_logtime[type] = (-1,-1)
@@ -96,6 +96,8 @@ class SensorData:
         self.y = y
         self.z = z
         self.time = time.time()
+        self.pc_norm = None
+        self.angle_change = None
 
 class Sensor:
     def __init__(self, callback, val_lookback=10):
@@ -105,19 +107,18 @@ class Sensor:
         self.SENSOR.display_status()
         self.value_lookback = deque(maxlen=val_lookback)
         self.df_array = deque(maxlen=val_lookback)
-        self.avgx = 0
-        self.avgy = 0
-        self.avgz = 0
+        self.avg = None
+        self.avg_norm = None
         self.magnet = False
         self.magnet_time = 0
         self.callback = callback
         self.thread = threading.Thread(target=self.run_thread)
         self.calibration_time = 0
-        
+
     def compute_avg(self, max_std):
         if len(self.value_lookback)<self.lookback_size:
             return
-        
+
         x_values = [data.x for data in self.value_lookback]
         y_values = [data.y for data in self.value_lookback]
         z_values = [data.z for data in self.value_lookback]
@@ -136,7 +137,7 @@ class Sensor:
         if self.SENSOR.last_status > adafruit_mlx90393.STATUS_OK:
             self.SENSOR.display_status()
         self.value_lookback.append(SensorData(MX, MY, MZ))
-        
+
 
     def magnet_detect_lookback(self, arr):
         cnt = 0
@@ -148,24 +149,29 @@ class Sensor:
         return False
 
     def magnet_detected(self,data:SensorData, verbose=False):
-        (m_change, d_change) = self.compute_change((data.x, data.y, data.z))
+        (m_change, d_change) = self.compute_change(data)
         if abs(m_change) > 5 or abs(d_change) > 5:
             log_interval("magnet_detect", "magnet detected: m_change=%s, d_change=%s magnitude= %s , dir=%s"%(str(m_change), str(d_change), m_change, d_change),
                          interval=5, count=1, to_file=True)
             return True
         return False
 
-    def compute_change(self, v2):
+    def compute_change(self, sensorData:SensorData):
+        if sensorData.pc_norm != None:
+            return sensorData.pc_norm, sensorData.angle_change
         #if True:
         #    return (0.0,0.0)
-        v1=(self.avgx, self.avgy, self.avgz)
+        v1=self.avg
+        v2 = np.array([sensorData.x, sensorData.y, sensorData.z])
         norm2 = np.linalg.norm(v2)
-        norm1 = np.linalg.norm(v1)
-        
+        norm1 = self.avg_norm
+
         pc_norm = abs(100 * (norm2 - norm1) / norm1)
         csm = np.dot(v1, v2) / (norm1 * norm2)
         angle = np.arccos(csm)
         angle_change = (angle / np.pi) * 100
+        sensorData.pc_norm = pc_norm
+        sensorData.angle_change = angle_change
         return pc_norm,angle_change
 
     def run_thread(self):
@@ -173,16 +179,20 @@ class Sensor:
             self.read_sensor()
         while True:
             self.read_sensor()
-            
+
             if time.time() - self.calibration_time > 30:
                 avg = self.compute_avg(.9)
                 if avg is not None:
-                    (self.avgx, self.avgy, self.avgz) = avg
+                    (x,y,z) = avg
+                    self.avg = np.array([x,y,z])
+                    self.avg_norm = np.linalg.norm(self.avg)
                     self.calibration_time = time.time()
+                    for s in self.value_lookback:
+                        s.pc_norm = None
+                        s.angle_change = None
                     log_interval("reset magnet", "x=%s, y=%s, z=%s"%(avg), interval = 60)
-                cnt = 0
-            if self.avgx:
-                if self.magnet_detect_lookback(list(self.value_lookback)[-5:]):
+            if self.avg is not None:
+                if self.magnet_detect_lookback(list(self.value_lookback)[-4:]):
                     self.magnet=True
                     self.magnet_time = time.time()
                     self.callback()
@@ -217,7 +227,7 @@ class Door:
         log("door closing")
         silence('magnet')
         silence('magnet_detect')
-        
+
         self.lock=True
         self.open = False
         self.direction.trig(False)
@@ -275,7 +285,7 @@ class Door:
                 else:
                     log_interval("door_close","door can't close - beam/magnet detected %s %s"%(beam_on, magnet_on), interval=5, to_file=True)
             time.sleep(1)
-    
+
 if __name__ == '__main__':
     door = Door()
     if len(sys.argv)>1 and sys.argv[1] == "inter":
@@ -287,4 +297,4 @@ if __name__ == '__main__':
         door.close_door()
         door.thread.start()
         door.sensor.thread.start()
-    
+
