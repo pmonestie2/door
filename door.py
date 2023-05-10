@@ -9,15 +9,19 @@ import sys
 import numpy as np
 import signal
 import cProfile
+import itertools
 
+MAGNET_DETECT_LG_TYPE = 'magnet_detect'
 
-log_file_path = "/home/pi/door.log"
-log_file  = open(log_file_path, "a")
+MAGNET_LG_TYPE = 'magnet'
+
+LOG_FILE_PATH = "/home/pi/door.log"
+log_file  = open(LOG_FILE_PATH, "a")
 
 def handle_sighup(signum, frame):
     global log_file
     log_file.close()
-    log_file = open(log_file_path, "a")
+    log_file = open(LOG_FILE_PATH, "a")
     log("rotated file")
 signal.signal(signal.SIGHUP, handle_sighup)
 
@@ -63,15 +67,9 @@ class Relay:
     def trig(self, on=True):
         GPIO.output(self.pin, not on if not self.inverted else on)
     def test(self):
-        self.trig(False)
-        time.sleep(2)
-        self.trig(True)
-        time.sleep(2)
-        self.trig(False)
-        time.sleep(2)
-        self.trig(True)
-        time.sleep(2)
-        self.trig(False)
+        for i in range(5):
+            self.trig(i % 2 == 0)
+            time.sleep(2)
 
 class Beam:
     def __init__(self, pin, break_beam_callback):
@@ -79,13 +77,13 @@ class Beam:
         self.break_beam_callback = break_beam_callback
         GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         GPIO.add_event_detect(pin, GPIO.BOTH, callback=self.internal_break_beam_callback)
-        self.time=0
+        self.broken_time=0
     def internal_break_beam_callback(self, channel=None):
         if GPIO.input(self.pin):
             self.broken=False
         else:
             self.broken=True
-            self.time=time.time()
+            self.broken_time=time.time()
             self.break_beam_callback()
     def is_broken(self):
         return self.internal_break_beam_callback()
@@ -143,14 +141,14 @@ class Sensor:
         for data in arr:
             if self.magnet_detected(data):
                 cnt = cnt+1
-                if cnt>1:
+                if cnt > 1:
                     return True
         return False
 
     def magnet_detected(self,data:SensorData, verbose=False):
         (m_change, d_change) = self.compute_change(data)
         if abs(m_change) > 5 or abs(d_change) > 5:
-            log_interval("magnet_detect", "magnet detected: m_change=%s, d_change=%s magnitude= %s , dir=%s"%(str(m_change), str(d_change), m_change, d_change),
+            log_interval(MAGNET_DETECT_LG_TYPE, "magnet detected: m_change=%s, d_change=%s"%(str(m_change), str(d_change)),
                          interval=5, count=1, to_file=True)
             return True
         return False
@@ -192,7 +190,7 @@ class Sensor:
                         s.angle_change = None
                     log_interval("reset magnet", "x=%s, y=%s, z=%s"%(avg), interval = 60)
             if self.avg is not None:
-                if self.magnet_detect_lookback(list(self.value_lookback)[-4:]):
+                if self.magnet_detect_lookback(list(itertools.islice(self.value_lookback, len(self.value_lookback)-4, None))):
                     self.magnet=True
                     self.magnet_time = time.time()
                     self.callback()
@@ -220,8 +218,8 @@ class Door:
         if not self.open or self.lock:
             return
         log("door closing")
-        silence('magnet')
-        silence('magnet_detect')
+        silence(MAGNET_LG_TYPE)
+        silence(MAGNET_DETECT_LG_TYPE)
 
         self.lock=True
         self.open = False
@@ -231,8 +229,8 @@ class Door:
         self.motor.trig(False)
         self.direction.trig(True)
         self.closed_time = time.time()
-        unsilence('magnet')
-        unsilence('magnet_detect')
+        unsilence(MAGNET_LG_TYPE)
+        unsilence(MAGNET_DETECT_LG_TYPE)
         #allow sensor to reset
         self.sensor.force_calibration()
         time.sleep(2)
@@ -244,7 +242,7 @@ class Door:
         self.open_door(source="beam")
 
     def open_door_from_magnet(self):
-        log_interval("magnet", "magnet detected", interval=5, count = 2, to_file=True)
+        log_interval(MAGNET_LG_TYPE, "magnet detected", interval=5, count = 2, to_file=True)
         self.open_door(source="magnet")
 
 
@@ -252,8 +250,8 @@ class Door:
         if self.open or self.lock:
             return
         log("door opening source =%s" %source)
-        silence('magnet')
-        silence('magnet_detect')
+        silence(MAGNET_LG_TYPE)
+        silence(MAGNET_DETECT_LG_TYPE)
 
         self.lock = True
         self.open = True
@@ -262,8 +260,8 @@ class Door:
         time.sleep(time_to_open)
         self.motor.trig(False)
         log("door opened source=%s" %source)
-        unsilence('magnet')
-        unsilence('magnet_detect')
+        unsilence(MAGNET_LG_TYPE)
+        unsilence(MAGNET_DETECT_LG_TYPE)
         self.sensor.force_calibration()
         time.sleep(3)
         self.open_time = time.time()
@@ -274,7 +272,7 @@ class Door:
             if self.open and time.time() - self.open_time > self.open_min_time and not self.lock:
                 magnet_on = True if self.sensor.magnet or time.time() - self.sensor.magnet_time < 8 else False
                 self.beam.is_broken()
-                beam_on = True if self.beam.broken or time.time() - self.beam.time < 8 else False
+                beam_on = True if self.beam.broken or time.time() - self.beam.broken_time < 8 else False
                 if not beam_on and not magnet_on:
                     self.close_door()
                 else:
