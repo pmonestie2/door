@@ -10,6 +10,7 @@ import numpy as np
 import signal
 import cProfile
 import itertools
+import os
 
 MAGNET_DETECT_LG_TYPE = 'magnet_detect'
 
@@ -30,7 +31,7 @@ def log(msg, to_file=True):
     if to_file:
         log_file.write(_msg + "\n")
         log_file.flush()
-    print(_msg)
+    print(_msg, flush=True)
 
 
 type_to_logtime = {}
@@ -79,6 +80,9 @@ class Beam:
         GPIO.add_event_detect(pin, GPIO.BOTH, callback=self.internal_break_beam_callback)
         self.broken_time=0
     def internal_break_beam_callback(self, channel=None):
+        # if True:
+        #     self.broken = False
+        #     return
         if GPIO.input(self.pin):
             self.broken=False
         else:
@@ -176,33 +180,38 @@ class Sensor:
         for i in range(0, self.lookback_size):
             self.read_sensor()
         while True:
-            self.read_sensor()
+            try:
+                self.read_sensor()
+                if time.time() - self.calibration_time > 30:
+                    avg = self.compute_avg(.9)
+                    if avg is not None:
+                        (x,y,z) = avg
+                        self.avg = np.array([x,y,z])
+                        self.avg_norm = np.linalg.norm(self.avg)
+                        self.calibration_time = time.time()
+                        for s in self.value_lookback:
+                            s.pc_norm = None
+                            s.angle_change = None
+                        log_interval("reset magnet", "x=%s, y=%s, z=%s"%(avg), interval = 60)
+                if self.avg is not None:
+                    if self.magnet_detect_lookback(list(itertools.islice(self.value_lookback, len(self.value_lookback)-4, None))):
+                        self.magnet=True
+                        self.magnet_time = time.time()
+                        self.callback()
+                    else:
+                        self.magnet=False
+                time.sleep(.08)
+            except Exception as e:
+                log("exiting as exception" + str(e))
+                os._exit(1)
 
-            if time.time() - self.calibration_time > 30:
-                avg = self.compute_avg(.9)
-                if avg is not None:
-                    (x,y,z) = avg
-                    self.avg = np.array([x,y,z])
-                    self.avg_norm = np.linalg.norm(self.avg)
-                    self.calibration_time = time.time()
-                    for s in self.value_lookback:
-                        s.pc_norm = None
-                        s.angle_change = None
-                    log_interval("reset magnet", "x=%s, y=%s, z=%s"%(avg), interval = 60)
-            if self.avg is not None:
-                if self.magnet_detect_lookback(list(itertools.islice(self.value_lookback, len(self.value_lookback)-4, None))):
-                    self.magnet=True
-                    self.magnet_time = time.time()
-                    self.callback()
-                else:
-                    self.magnet=False
-            time.sleep(.08)
 
 
 class Door:
     def __init__(self):
         self.lock=False
         self.open_min_time = 10
+        self.open_max_time = 300
         self.cool_down_time = 5
         self.open_time = time.time()
         self.closed_time = time.time()
@@ -269,22 +278,36 @@ class Door:
 
     def read_sensor_thread(self):
         while True:
-            if self.open and time.time() - self.open_time > self.open_min_time and not self.lock:
-                magnet_on = True if self.sensor.magnet or time.time() - self.sensor.magnet_time < 8 else False
-                self.beam.is_broken()
-                beam_on = True if self.beam.broken or time.time() - self.beam.broken_time < 8 else False
-                if not beam_on and not magnet_on:
-                    self.close_door()
-                else:
-                    log_interval("door_close","door can't close - beam/magnet detected %s %s"%(beam_on, magnet_on), interval=5, to_file=True)
-            time.sleep(1)
+            try:
+                if self.open and time.time() - self.open_time > self.open_min_time and not self.lock:
+                    magnet_on = True if self.sensor.magnet or time.time() - self.sensor.magnet_time < 8 else False
+                    self.beam.is_broken()
+                    beam_on = True if self.beam.broken or time.time() - self.beam.broken_time < 8 else False
+                    if not beam_on and not magnet_on:
+                        self.close_door()
+                    else:
+                        if time.time() - self.open_time > self.open_max_time:
+                            log("exiting, open time too long")
+                            os._exit(1)
+                        log_interval("door_close","door can't close - beam/magnet detected %s %s"%(beam_on, magnet_on), interval=5, to_file=True)
+                time.sleep(1.5)
+            except Exception as e:
+                log("exiting as exception" + str(e))
+                os._exit(1)
+
+
+def beam_log():
+    #print("change")
+    pass
 
 if __name__ == '__main__':
-    door = Door()
-    if len(sys.argv)>1 and sys.argv[1] == "inter":
+    if len(sys.argv)>1 and sys.argv[1] == "beam":
         #cProfile.run('door.sensor.run_thread()', sort='cumtime')
-        door.sensor.run_thread()
+        k = Beam(22, beam_log)
+        while True:
+            time.sleep(1)
     else:
+        door = Door()
         log("closing door and starting door thread")
         door.open = True
         door.close_door()
