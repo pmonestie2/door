@@ -1,9 +1,6 @@
 import time
-import board
-import adafruit_mlx90393
 import math
 from collections import deque
-import RPi.GPIO as GPIO
 import threading
 import sys
 import numpy as np
@@ -11,24 +8,31 @@ import signal
 import cProfile
 import itertools
 import os
+from functools import wraps
 
 MAGNET_DETECT_LG_TYPE = 'magnet_detect'
 
 MAGNET_LG_TYPE = 'magnet'
 
 LOG_FILE_PATH = "/home/pi/door.log"
-log_file  = open(LOG_FILE_PATH, "a")
+log_file = None
+
+def configure_logging(path=LOG_FILE_PATH):
+    """Set up file logging and rotation only when the application starts."""
+    global log_file, LOG_FILE_PATH
+    LOG_FILE_PATH = path
+    log_file = open(path, "a")
+    signal.signal(signal.SIGHUP, handle_sighup)
 
 def handle_sighup(signum, frame):
     global log_file
     log_file.close()
     log_file = open(LOG_FILE_PATH, "a")
     log("rotated file")
-signal.signal(signal.SIGHUP, handle_sighup)
 
 def log(msg, to_file=True):
     _msg = "[%s] %s"%(time.ctime(), msg)
-    if to_file:
+    if to_file and log_file is not None:
         log_file.write(_msg + "\n")
         log_file.flush()
     print(_msg, flush=True)
@@ -36,10 +40,14 @@ def log(msg, to_file=True):
 
 type_to_logtime = {}
 def silence(type):
+    #silence by setting -1
     type_to_logtime[type] = (-1,-1)
 def unsilence(type):
     type_to_logtime.pop(type, None)
 def log_interval(type, msg, interval=10.0, count = 1, to_file=False):
+    """
+    log at an interval - interval is different for each type
+    """
     if type not in type_to_logtime:
         type_to_logtime[type] = (0, 0)
     if type_to_logtime[type] is (-1, -1):
@@ -60,30 +68,29 @@ def log_interval(type, msg, interval=10.0, count = 1, to_file=False):
         type_to_logtime[type] = (new_time, new_count)
 
 class Relay:
-    def __init__(self, pin, inverted=False):
+    def __init__(self, pin, inverted=False, *, gpio):
+        self.gpio = gpio
         self.pin = pin
         self.inverted = inverted
-        GPIO.setup(pin, GPIO.OUT)
+        self.gpio.setup(pin, self.gpio.OUT)
         self.trig(False)
     def trig(self, on=True):
-        GPIO.output(self.pin, not on if not self.inverted else on)
+        self.gpio.output(self.pin, not on if not self.inverted else on)
     def test(self):
         for i in range(5):
             self.trig(i % 2 == 0)
             time.sleep(2)
 
 class Beam:
-    def __init__(self, pin, break_beam_callback):
+    def __init__(self, pin, break_beam_callback, *, gpio):
+        self.gpio = gpio
         self.pin = pin
         self.break_beam_callback = break_beam_callback
-        GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-        GPIO.add_event_detect(pin, GPIO.BOTH, callback=self.internal_break_beam_callback)
+        self.gpio.setup(pin, self.gpio.IN, pull_up_down=self.gpio.PUD_UP)
+        self.gpio.add_event_detect(pin, self.gpio.BOTH, callback=self.internal_break_beam_callback)
         self.broken_time=0
     def internal_break_beam_callback(self, channel=None):
-        # if True:
-        #     self.broken = False
-        #     return
-        if GPIO.input(self.pin):
+        if self.gpio.input(self.pin):
             self.broken=False
         else:
             self.broken=True
@@ -101,12 +108,28 @@ class SensorData:
         self.pc_norm = None
         self.angle_change = None
 
+def create_magnetic_reader():
+    """Connect the Pi hardware and return a callable yielding (x, y, z)."""
+    import board
+    import adafruit_mlx90393
+
+    i2c = board.I2C()
+    device = adafruit_mlx90393.MLX90393(i2c, gain=adafruit_mlx90393.GAIN_2X)
+    device.display_status()
+
+    def read():
+        values = device.magnetic
+        if device.last_status > adafruit_mlx90393.STATUS_OK:
+            device.display_status()
+        return values
+
+    return read
+
+
 class Sensor:
-    def __init__(self, callback, val_lookback=10):
+    def __init__(self, callback, val_lookback=10, *, read_magnetic):
         self.lookback_size = val_lookback
-        self.i2c = board.I2C()  # uses board.SCL and board.SDA
-        self.SENSOR = adafruit_mlx90393.MLX90393(self.i2c, gain=adafruit_mlx90393.GAIN_2X)
-        self.SENSOR.display_status()
+        self.read_magnetic = read_magnetic
         self.value_lookback = deque(maxlen=val_lookback)
         self.avg = None
         self.avg_norm = None
@@ -117,6 +140,10 @@ class Sensor:
         self.calibration_time = 0
 
     def compute_avg(self, max_std):
+        """
+        Given the values in a bounded list, value_lookback compute an average for each axis
+        std_def of values have to deviate no more than max_std
+        """
         if len(self.value_lookback)<self.lookback_size:
             return
 
@@ -131,16 +158,19 @@ class Sensor:
         else:
             return None
     def force_calibration(self):
+        #calibration is only done every N seconds. this force recalibration
         self.calibration_time = 0
 
     def read_sensor(self):
-        MX, MY, MZ = self.SENSOR.magnetic
-        if self.SENSOR.last_status > adafruit_mlx90393.STATUS_OK:
-            self.SENSOR.display_status()
+        MX, MY, MZ = self.read_magnetic()
+        #value read are put in the lookback, to be used also for calibration
         self.value_lookback.append(SensorData(MX, MY, MZ))
 
 
     def magnet_detect_lookback(self, arr):
+        """
+        detect magnet in range - at least 2 values have to be above threshold
+        """
         cnt = 0
         for data in arr:
             if self.magnet_detected(data):
@@ -158,6 +188,9 @@ class Sensor:
         return False
 
     def compute_change(self, sensorData:SensorData):
+        """
+        rate of change for direction and magnitude between the avg data stored and the current data in sensorData
+        """
         if sensorData.pc_norm != None:
             return sensorData.pc_norm, sensorData.angle_change
         #if True:
@@ -183,6 +216,7 @@ class Sensor:
             try:
                 self.read_sensor()
                 if time.time() - self.calibration_time > 30:
+                    #recalibrate
                     avg = self.compute_avg(.9)
                     if avg is not None:
                         (x,y,z) = avg
@@ -194,9 +228,11 @@ class Sensor:
                             s.angle_change = None
                         log_interval("reset magnet", "x=%s, y=%s, z=%s"%(avg), interval = 60)
                 if self.avg is not None:
+                    #slice the lookback from the last 4 and detect at least 2 changes
                     if self.magnet_detect_lookback(list(itertools.islice(self.value_lookback, len(self.value_lookback)-4, None))):
                         self.magnet=True
                         self.magnet_time = time.time()
+                        #magnet change detected - call the callback
                         self.callback()
                     else:
                         self.magnet=False
@@ -206,23 +242,48 @@ class Sensor:
                 os._exit(1)
 
 
+class FakeBeam:
+    def is_broken(self):
+        return False
+    def __init__(self):
+        self.broken = False
+        self.broken_time = 0
+
+def serialize_movement(method):
+    """Ignore commands during a movement instead of queuing a later reversal."""
+    @wraps(method)
+    def run(self, *args, **kwargs):
+        if not self.movement_lock.acquire(blocking=False):
+            return
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            self.movement_lock.release()
+    return run
+
 
 class Door:
-    def __init__(self):
+    def __init__(self, *, sensor, motor, direction, beam=None,
+                 clock=time, exit_process=os._exit):
+        self.clock = clock
+        self.exit_process = exit_process
         self.lock=False
-        self.open_min_time = 10
-        self.open_max_time = 300
+        self.movement_lock = threading.Lock()
+        self.open_min_time = 90
+        self.open_max_time = 500
         self.cool_down_time = 5
-        self.open_time = time.time()
-        self.closed_time = time.time()
+        self.open_time = self.clock.time()
+        self.closed_time = self.clock.time()
         self.open = None
-        self.sensor = Sensor(val_lookback = 10, callback=self.open_door_from_magnet)
+        self.sensor = sensor
+        self.sensor.callback = self.open_door_from_magnet
         self.thread = threading.Thread(target=self.read_sensor_thread)
-        self.motor = Relay(27, inverted=True)
-        self.direction = Relay(17)
-        self.beam = Beam(22, self.open_door_from_beam)
+        self.motor = motor
+        self.direction = direction
+        self.beam = FakeBeam() if beam is None else beam
 
 
+    @serialize_movement
     def close_door(self):
         if not self.open or self.lock:
             return
@@ -234,15 +295,15 @@ class Door:
         self.open = False
         self.direction.trig(False)
         self.motor.trig(True)
-        time.sleep(16)
+        self.clock.sleep(16)
         self.motor.trig(False)
         self.direction.trig(True)
-        self.closed_time = time.time()
+        self.closed_time = self.clock.time()
         unsilence(MAGNET_LG_TYPE)
         unsilence(MAGNET_DETECT_LG_TYPE)
         #allow sensor to reset
         self.sensor.force_calibration()
-        time.sleep(2)
+        self.clock.sleep(2)
         self.lock = False
         log("door closed")
 
@@ -255,6 +316,7 @@ class Door:
         self.open_door(source="magnet")
 
 
+    @serialize_movement
     def open_door(self, time_to_open=13, source="magnet"):
         if self.open or self.lock:
             return
@@ -266,51 +328,69 @@ class Door:
         self.open = True
         self.direction.trig(True)
         self.motor.trig(True)
-        time.sleep(time_to_open)
+        self.clock.sleep(time_to_open)
         self.motor.trig(False)
         log("door opened source=%s" %source)
         unsilence(MAGNET_LG_TYPE)
         unsilence(MAGNET_DETECT_LG_TYPE)
         self.sensor.force_calibration()
-        time.sleep(3)
-        self.open_time = time.time()
+        self.clock.sleep(3)
+        self.open_time = self.clock.time()
         self.lock = False
 
     def read_sensor_thread(self):
         while True:
             try:
-                if self.open and time.time() - self.open_time > self.open_min_time and not self.lock:
-                    magnet_on = True if self.sensor.magnet or time.time() - self.sensor.magnet_time < 8 else False
+                if self.open and self.clock.time() - self.open_time > self.open_min_time and not self.lock:
+                    #figures out if both magnet and door are not active - if so close the door
+                    magnet_on = True if self.sensor.magnet or self.clock.time() - self.sensor.magnet_time < 8 else False
                     self.beam.is_broken()
-                    beam_on = True if self.beam.broken or time.time() - self.beam.broken_time < 8 else False
+                    beam_on = True if self.beam.broken or self.clock.time() - self.beam.broken_time < 8 else False
                     if not beam_on and not magnet_on:
+                        #note that if door is already closed this will do nothing.
                         self.close_door()
                     else:
-                        if time.time() - self.open_time > self.open_max_time:
+                        #was open too long - exiting
+                        if self.clock.time() - self.open_time > self.open_max_time:
                             log("exiting, open time too long")
-                            os._exit(1)
+                            self.exit_process(1)
                         log_interval("door_close","door can't close - beam/magnet detected %s %s"%(beam_on, magnet_on), interval=5, to_file=True)
-                time.sleep(1.5)
+                self.clock.sleep(1.5)
             except Exception as e:
                 log("exiting as exception" + str(e))
-                os._exit(1)
+                self.exit_process(1)
 
 
 def beam_log():
     #print("change")
     pass
 
-if __name__ == '__main__':
+def main():
+    import RPi.GPIO as GPIO
+
+    configure_logging()
+    GPIO.setmode(GPIO.BCM)
     if len(sys.argv)>1 and sys.argv[1] == "beam":
         #cProfile.run('door.sensor.run_thread()', sort='cumtime')
-        k = Beam(22, beam_log)
+        k = Beam(22, beam_log, gpio=GPIO)
         while True:
             time.sleep(1)
     else:
-        door = Door()
+        sensor = Sensor(callback=None, read_magnetic=create_magnetic_reader())
+        door = Door(sensor=sensor, motor=Relay(27, inverted=True, gpio=GPIO),
+                    direction=Relay(17, gpio=GPIO))
         log("closing door and starting door thread")
         door.open = True
         door.close_door()
         door.thread.start()
         door.sensor.thread.start()
+        from door_web import start_server
+        try:
+            start_server(door)
+            log("web controls listening on port 8080")
+        except OSError as error:
+            log("web controls unavailable: %s" % error)
 
+
+if __name__ == '__main__':
+    main()
