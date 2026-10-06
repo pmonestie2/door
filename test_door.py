@@ -225,21 +225,16 @@ assert not {'board', 'adafruit_mlx90393', 'RPi.GPIO'} & sys.modules.keys()
         controller.close_door.assert_called_once_with()
         self.exit_process.assert_not_called()
 
-    def test_website_close_overrides_schedule_and_sensor_triggers(self):
-        self.now = 12*3600
-        controller = self.make_door(keep_open_start="08:00", keep_open_end="18:00")
-        controller.open = True
+    def test_website_close_restores_sensor_opening(self):
+        """Close clears the Open hold but does not latch the door closed."""
+        controller = self.make_door()
+        controller.open_door(source="website")
         controller.close_door(source="website")
         self.assertFalse(controller.open)
-        self.assertTrue(controller.website_override == "closed")
-        controller.motor.reset_mock()
+        self.assertIsNone(controller.website_override)
+        self.assertFalse(controller.close_requested)
         controller.open_door_from_magnet()
-        controller.open_door_from_beam()
-        controller.update_door_state()
-        self.now += 60
-        controller.update_door_state()
-        controller.motor.trig.assert_not_called()
-        self.exit_process.assert_not_called()
+        self.assertTrue(controller.open)
 
     def test_website_open_holds_past_minimum_time(self):
         """Manual Open prevents automatic closing until the hold is replaced."""
@@ -252,67 +247,25 @@ assert not {'board', 'adafruit_mlx90393', 'RPi.GPIO'} & sys.modules.keys()
         self.assertTrue(controller.open)
         self.assertEqual(controller.website_override, "open")
 
-    def test_website_open_clears_close_override(self):
-        controller = self.make_door()
-        controller.close_door(source="website")
+    def test_schedule_boundary_clears_open_hold(self):
+        """At the schedule end, automatic control resumes with a fresh timer."""
+        self.now = 12 * 3600
+        controller = self.make_door(keep_open_start="08:00", keep_open_end="18:00")
         controller.open_door(source="website")
-        self.assertFalse(controller.website_override == "closed")
-        self.assertTrue(controller.open)
-        self.assertEqual(controller.motor.trig.call_args_list, [call(True), call(False)])
-
-    def test_next_schedule_start_clears_manual_close_and_opens(self):
-        self.now = 7*3600
-        controller = self.make_door(keep_open_start="08:00", keep_open_end="18:00")
-        controller.close_door(source="website")
-        self.now = 8*3600
+        self.now = 18 * 3600
         controller.update_door_state()
-        self.assertFalse(controller.website_override == "closed")
+        self.assertIsNone(controller.website_override)
         self.assertTrue(controller.open)
 
-    def test_next_schedule_end_clears_manual_close_and_restores_sensors(self):
-        self.now = 12*3600
+    def test_schedule_can_reopen_after_website_close(self):
+        """A Close command does not suppress later scheduled opening."""
+        self.now = 12 * 3600
         controller = self.make_door(keep_open_start="08:00", keep_open_end="18:00")
+        controller.open = True
         controller.close_door(source="website")
-        self.now = 18*3600
+        self.assertFalse(controller.open)
         controller.update_door_state()
-        self.assertFalse(controller.website_override == "closed")
-        controller.motor.trig.assert_not_called()
-        controller.open_door_from_magnet()
         self.assertTrue(controller.open)
-
-    def test_midnight_does_not_expire_manual_close(self):
-        self.now = 23*3600
-        controller = self.make_door(keep_open_start="08:00", keep_open_end="18:00")
-        controller.close_door(source="website")
-        self.now = 86400
-        controller.update_door_state()
-        self.assertTrue(controller.website_override == "closed")
-        controller.motor.trig.assert_not_called()
-
-    def test_skipped_schedule_boundaries_still_expire_manual_close(self):
-        self.now = 12*3600
-        controller = self.make_door(keep_open_start="08:00", keep_open_end="18:00")
-        controller.close_door(source="website")
-        self.now += 86400
-        controller.update_door_state()
-        self.assertFalse(controller.website_override == "closed")
-        self.assertTrue(controller.open)
-
-    def test_website_close_at_boundary_overrides_that_schedule_period(self):
-        self.now = 7*3600
-        controller = self.make_door(keep_open_start="08:00", keep_open_end="18:00")
-        self.now = 8*3600
-        controller.close_door(source="website")
-        controller.update_door_state()
-        self.assertTrue(controller.website_override == "closed")
-        controller.motor.trig.assert_not_called()
-
-    def test_disabled_schedule_keeps_manual_close_across_days(self):
-        controller = self.make_door()
-        controller.close_door(source="website")
-        self.now += 2*86400
-        controller.update_door_state()
-        self.assertTrue(controller.website_override == "closed")
 
     def test_control_loop_updates_then_waits(self):
         controller = self.make_door()
@@ -335,7 +288,7 @@ assert not {'board', 'adafruit_mlx90393', 'RPi.GPIO'} & sys.modules.keys()
 
         with patch.object(self.clock, "sleep", side_effect=request_close_during_sleep):
             controller.open_door()
-        self.assertTrue(controller.website_override == "closed")
+        self.assertTrue(controller.close_requested)
         self.assertTrue(controller.open)
         self.assertEqual(controller.motor.trig.call_args_list, [call(True), call(False)])
 
@@ -347,7 +300,7 @@ assert not {'board', 'adafruit_mlx90393', 'RPi.GPIO'} & sys.modules.keys()
     def test_new_controller_has_no_website_override(self):
         controller = self.make_door()
         controller.close_door(source="website")
-        self.assertFalse(self.make_door().website_override == "closed")
+        self.assertIsNone(self.make_door().website_override)
 
     def test_forced_close_can_override_schedule(self):
         self.now = 12*3600

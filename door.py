@@ -312,6 +312,7 @@ class Door:
         self.keep_open_end = self.parse_schedule_time(keep_open_end)
         self.schedule_event = self.latest_schedule_event()
         self.website_override = None
+        self.close_requested = False
         self.lock=False
         self.movement_lock = threading.Lock()
         self.open_min_time = OPEN_MIN_TIME
@@ -385,23 +386,28 @@ class Door:
         if event != self.schedule_event:
             self.schedule_event = event
             self.website_override = None
+            self.close_requested = False
             if event is not None and event[1] == self.keep_open_end:
                 self.open_time = self.clock.time()
         return event is not None and event[1] == self.keep_open_start
 
     def close_door(self, force=False, source="automatic"):
-        """Request closing; website Close overrides sensors until the next schedule event."""
+        """Request closing; website Close clears the open hold without holding closed."""
         if source == "website":
             self.update_schedule_state()
-            self.website_override = "closed"
+            self.website_override = None
+            self.close_requested = True
         self._close_door(force, source)
 
     @serialize_movement
     def _close_door(self, force=False, source="automatic"):
         """Run a closing cycle, honoring website override or a forced schedule bypass."""
-        if not self.open or self.lock or self.website_override == "open":
+        if self.lock or self.website_override == "open":
             return
-        if not force and self.website_override != "closed" and self.is_scheduled_open():
+        if not self.open:
+            self.close_requested = False
+            return
+        if not force and source != "website" and self.is_scheduled_open():
             return
         if self.clock.time() < self.next_close_check:
             return
@@ -421,7 +427,7 @@ class Door:
         scheduled_open = self.update_schedule_state()
         if open_request_version != self.open_request_version:
             return
-        if not force and self.website_override != "closed":
+        if not force and source != "website":
             if scheduled_open or self.has_recent_activity():
                 return
             if self.open_time != open_time and self.clock.time() - self.open_time <= self.open_min_time:
@@ -446,6 +452,7 @@ class Door:
         self.clock.sleep(16)
         self.motor.trig(False)
         self.direction.trig(True)
+        self.close_requested = False
         self.closed_time = self.clock.time()
         unsilence(MAGNET_LG_TYPE)
         unsilence(MAGNET_DETECT_LG_TYPE)
@@ -466,7 +473,7 @@ class Door:
         if self.analytics is not None:
             try:
                 self.analytics.magnet(self.clock.time(),
-                                      blocked=self.lock or not self.open or self.website_override == "closed")
+                                      blocked=self.lock or not self.open)
             except Exception as error:
                 log("analytics unavailable: %s" % error)
         log_interval(MAGNET_LG_TYPE, "magnet detected", interval=5, count = 2, to_file=True)
@@ -479,12 +486,13 @@ class Door:
             self.open_request_version += 1
             self.update_schedule_state()
             self.website_override = "open"
+            self.close_requested = False
         self._open_door(time_to_open, source)
 
     @serialize_movement
     def _open_door(self, time_to_open=13, source="magnet"):
         """Run the opening cycle, then start the normal minimum-open timer."""
-        if self.website_override == "closed" or self.open or self.lock:
+        if self.open or self.lock:
             return
         log("door opening source =%s" %source)
         silence(MAGNET_LG_TYPE)
@@ -528,8 +536,8 @@ class Door:
         scheduled_open = self.update_schedule_state()
         if self.lock:
             return
-        if self.website_override == "closed":
-            self.close_door()
+        if self.close_requested:
+            self.close_door(source="website")
             return
         if self.website_override == "open":
             self.open_door(source="website")

@@ -59,8 +59,8 @@ button{{font:inherit;padding:.7em 1.4em;margin-right:.5em}}</style>
 <input type="hidden" name="token" value="{token}">
 <button formaction="/open">Open</button>
 <button formaction="/close">Close</button>
-</form><p>Open and Close hold the selected state until the next website command,
-schedule start/end, or controller restart. Close requires a clear camera check.</p>
+</form><p>Open holds the door open until Close, a schedule boundary, or restart.
+Close requests a camera-checked close, then restores automatic control; sensors can reopen it.</p>
 <p><button type="button" id="take-photo">Take photo (Pull mode)</button></p>
 <p id="camera-result"></p>
 <p><button type="button" id="run-inference">Run inference</button></p>
@@ -270,7 +270,8 @@ document.getElementById('take-photo').onclick = async function() {{
                 door.close_door(source="website")
             if is_json:
                 response = json.dumps({"open": bool(door.open), "busy": door.lock,
-                                       "keep_closed": door.website_override == "closed",
+                                       "keep_closed": False,
+                                       "close_pending": door.close_requested,
                                        "keep_open": door.website_override == "open"}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")

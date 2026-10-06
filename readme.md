@@ -1,204 +1,321 @@
-# Door Sensor System
+# Cat door
 
-This Python code is designed to run on a Raspberry Pi with specific hardware components and serves as a door sensor system. The code is written in Python and utilizes various libraries, including `time`, `board`, `adafruit_mlx90393`, `math`, `collections`, `RPi.GPIO`, and `threading`.
+A Raspberry Pi controller for a motorized cat door, with a small website, a phone
+camera, obstruction detection, and passage analytics. The Pi controls the motor
+and reads the magnet sensor. The phone supplies photos; model inference runs on
+the Pi. Training runs separately on the Mac.
 
-The code monitors a door using a combination of a magnetic field sensor (MLX90393), a break beam sensor, and two relays to control a motor and a direction relay. The magnetic field sensor measures the magnetic field strength and direction changes (caused by a pet wearing a magnet), while the break beam sensor detects the interruption of a light beam caused by a pet. The motor and direction relay are used to control the door motor and direction.
+The current installation is a **Raspberry Pi 3 running 64-bit Raspberry Pi OS**,
+hostname **`picat`**, with a Nexus 5X camera. An iPhone app is also included.
 
-## Web controls
+## Everyday commands
 
-After starting `python3 door.py`, open `http://<pi-ip-address>:8080/` on your
-local network. The page shows the door state and Open/Close buttons. No extra
-packages are required; deploy `door_web.py` alongside `door.py`.
+Open the controls at **[http://picat.local:8080](http://picat.local:8080)**.
+On the phone, use `http://picat:8080`, `http://picat.local:8080`, or the Pi's LAN IP,
+whichever resolves on that device.
 
-Open and Close hold the selected state, overriding automatic timers and sensor
-triggers, until the next website command, schedule boundary, or process restart.
-With scheduling disabled, the hold lasts until another website command or restart.
-Close still requires a clear camera check. Commands during movement are retained
-and applied after movement finishes. The page displays the current hold.
+On the Pi:
 
-There is no login: anyone who can reach port 8080 can operate the door. Keep it
-on a trusted local network. If the port is occupied, the controller logs the
-error and continues without web controls. No web-server tests are included.
+```sh
+# Restart the controller and website
+sudo systemctl restart catdoor
 
-The same commands are available as JSON REST endpoints: `POST /open` and
-`POST /close`. Send `Content-Type: application/json` and an empty JSON object:
+# Check the service
+systemctl status catdoor
 
-```bash
-curl -H 'Content-Type: application/json' -d '{}' http://<pi-ip-address>:8080/close
-curl -H 'Content-Type: application/json' -d '{}' http://<pi-ip-address>:8080/open
+# Follow controller events and inference scores
+tail -f ~/door.log
+
+# Follow everything, including HTTP requests and Python errors
+tail -f ~/door-script.log
 ```
 
-Responses contain `open`, `busy`, and `keep_closed` booleans. Requests normally
-return after the movement finishes. When busy, Close records the override for
-the controller to apply after the current movement. `open` reflects the
-controller's commanded state, not position feedback. GET requests never move
-the door. JSON commands need no form token; the API has the same trusted-network
-access as the website.
+**Restarting lowers the door to establish its closed position.** That startup
+cycle does not request a photo or run an obstruction check. The model warms up
+in a background thread while the door lowers; web controls start after lowering
+and settling finish. Manual website holds are cleared on restart.
 
-## Android camera
+## How the door behaves
 
-The native [Android app](android/README.md) supports Android 5.1 and newer,
-including older Nexus phones. It has the same Push/Pull modes and crop controls
-as the iPhone app and uses the same Pi endpoints. It runs capture in a foreground service so the screen can sleep, and captures
-full-resolution photos without a shutter sound on supported phones. Push intervals
-are selectable from 1 to 60 seconds. Stop in the app or notification ends the run. No Google account, photo-library
-access, or rooting is required. Images are retained only on the Pi.
+| Situation | Behavior |
+|---|---|
+| Magnet detected while closed | Opens; website Close does not disable sensor opening. |
+| Normal automatic closing | Waits the minimum-open time, checks recent activity, then requests a fresh photo. |
+| Model says unobstructed | Closing can proceed after rechecking activity and schedule changes. |
+| Obstruction, missing phone, or inference error | Stays open and retries later. |
+| Website **Open** | Opens and holds open; no inference is needed. |
+| Website **Close** | Clears the open hold and requests a camera-checked close, then resumes automatic control. |
+| Enabled daily schedule | Opens for the configured interval. A website hold takes priority until the next schedule boundary. |
 
-## iPhone camera
+The website Open hold lasts until Close, the next schedule boundary,
+or a controller restart. With scheduling disabled, it lasts until another
+website command or restart. Commands received during movement are retained and
+applied after the current movement finishes. Website Open during a pending camera
+check cancels that close.
 
-The native [iPhone app](ios/README.md) has a Push/Pull toggle: Push uploads a cropped
-photo every ten seconds; Pull waits for a Pi command and uploads a fresh photo.
-Both use `POST /camera`. In Pull mode, use **Take photo** on the website or
-`POST /camera/capture` with JSON `{}`. Check the returned request ID at
-`GET /camera/request?id=...`; each request times out after thirty seconds. Open `ios/CatDoorCamera/CatDoorCamera.xcodeproj`
-in Xcode to install it on an iPhone running iOS 15 or newer. No jailbreak is needed.
-Deploy `door_camera.py` with the updated web module and restart the controller.
-The website's **Latest photo** link displays the latest upload; capture/receipt
-timestamps are available at `GET /camera/latest`. After each pulled photo is saved, storage keeps only the latest five photos
-and their JSON metadata under `camera_images/`. Push uploads accumulate until the next pull. See the app README for setup, retention, and installation.
+There is **no maximum-open timeout**. A blocked closing check does not force the
+door closed or restart the controller. Unexpected control-loop errors still exit
+the process, and systemd restarts it.
 
-## Photo check before closing
+The displayed door state is the controller's commanded state, not a measurement
+from a position sensor. Startup lowering establishes the reference position.
 
-Every normal closing cycle from an open state, including website Close, first
-requests a fresh phone photo through the existing Pull protocol. Keep the phone
-app started in **Pull** mode. Deploy `pull_photo.py`, `door_camera.py`, and
-`door_inference.py` alongside the controller and web module. Opening never requests
-a photo or runs inference. On every process start (including reboot), the controller
-lowers the door for the full motor cycle without requesting a photo or running
-inference. This establishes the closed position before starting web controls and
-sensor/control threads. Subsequent closing cycles require the camera check.
+## Configuration
 
-`door_inference.py` reads the saved image matching that capture request and passes
-its bytes to `run_inference(image)`. The trained classifier in `fat_cat_model/`
-is loaded once and reused, with the threshold stored in `model.pt`. A background
-thread warms it at startup with a synthetic image while the door homes. The warm-up
-result is discarded; it requests no phone photo and does not affect movement.
-An early real inference request waits on the same model lock. Readiness or failure
-is logged. Only an
-`unobstructed` result permits closing; obstructions and errors keep the door open.
+Edit the constants near the top of [`door.py`](door.py), then restart the service.
+Python does not reload edits automatically.
 
-The website's **Run inference** button requests a fresh photo and displays the
-model result without moving the door or changing its override. The same action is
-available as `POST /camera/inference` with JSON `{}`; it returns `clear_to_close`
-and `mock: false`, or an error if capture or inference fails. Website inference works with the door open or closed; requests
-are rejected only while it is moving or settling.
+| Setting | Current value | Meaning |
+|---|---|---|
+| `KEEP_OPEN_START` | `"21:20"` | Start of the daily keep-open interval. |
+| `KEEP_OPEN_END` | `"18:00"` | End of the daily keep-open interval. |
+| `OPEN_MIN_TIME` | `20` | Seconds after opening and settling before automatic closing is eligible. |
+| `CLOSE_CHECK_INTERVAL` | `10` | Minimum seconds after a closing check finishes before requesting another photo. |
 
-A missing phone, timed-out or busy capture request, unreadable photo, or inference
-error leaves the door open. Checks can wait approximately 35 seconds for a photo;
-failed or blocked checks retry on a later eligible control-loop iteration, with
-at least five seconds after each check. No cached photo is used.
+**The current schedule is disabled**, because its end is earlier than its start.
+To keep the door open from 08:00 to 18:00, set those two times explicitly. Times
+use the Pi's local timezone and 24-hour `HH:MM` format. An end equal to or earlier
+than the start disables the schedule; intervals do not wrap overnight.
 
-After capture and inference, automatic closing rechecks sensor activity and the
-schedule. Website Close still overrides sensors and the schedule, but requires
-the photo/inference check. Website Open received during capture cancels that close.
+At a schedule boundary, either website hold expires. The end boundary also
+starts a fresh minimum-open timer. The control loop runs every 1.5 seconds, so
+the actual interval between photos includes loop timing, camera capture/upload,
+and inference in addition to `CLOSE_CHECK_INTERVAL`.
+
+Motor timings are currently 13 seconds opening plus 3 seconds settling, and
+16 seconds lowering plus 2 seconds settling. These are configured in the movement
+methods and depend on this particular mechanism.
+
+## Phone camera
+
+Install either the [Android app](android/README.md) or the
+[iPhone app](ios/README.md), enter the Pi server address, frame/crop the doorway,
+select **Pull**, and tap **Start**.
+
+- **Pull:** the phone waits for a Pi request, takes a fresh photo, and uploads it.
+  This is the mode required for automatic obstruction checks.
+- **Push:** the phone takes photos periodically, useful for gathering training
+  images. Android offers intervals from 1 to 60 seconds; iPhone uses 10 seconds.
+
+The Android app runs capture in a foreground service, so the screen can sleep.
+At night, from 18:00 through 07:59 in phone local time, it switches on the camera
+light, allows **1.5 seconds** for exposure to settle, and keeps the light on until
+the JPEG arrives. It switches off before processing/upload and stays off between
+captures. Stopping the service or a capture timeout releases the camera and light.
+The iPhone app needs to remain active and keeps its screen awake.
+
+The apps do not save pictures to Photos or Google Photos. Uploads are stored on
+the Pi in `camera_images/`. **Each successful Pull upload prunes storage to the
+latest five photos and their metadata.** Push uploads accumulate until the next
+Pull cleanup. Copy useful training examples to the Mac before they are removed.
+
+On the website:
+
+- **Take photo** requests a new capture.
+- **Latest photo** displays the most recent upload.
+- **Run inference** requests a new photo and shows the classification without
+  moving the door. It works with the door raised or lowered, but not during
+  movement or settling. It does not add an analytics event.
+
+App installation, builds, permissions, and crop controls are documented in the
+[Android](android/README.md) and [iPhone](ios/README.md) directories.
+
+## Obstruction model
+
+[`door_inference.py`](door_inference.py) requests a photo and checks the exact
+uploaded filename associated with that request. It never substitutes an older
+cached photo. [`fat_cat_model/inference.py`](fat_cat_model/inference.py) loads the
+committed PyTorch checkpoint once and reuses it. Startup warm-up uses a synthetic
+image whose result is discarded; an early real check waits for the model lock.
+
+The model produces an **obstruction score** between 0 and 1. Scores at or above
+the threshold stored in the checkpoint mean obstructed. The current threshold
+is approximately **0.817265**. These scores are uncalibrated: 0.9 does not mean a
+measured 90% probability of obstruction.
+
+Each real prediction, including website checks, logs its label, score, and
+threshold to both `~/door.log` and `~/door-script.log`:
+
+```text
+inference: result=unobstructed score=0.582405 threshold=0.817265
+```
+
+The current model uses RGB images letterboxed to 384×384, a frozen
+MobileNetV3-Small backbone, 2×2 average pooling, and a trained linear head.
+It correctly classifies the 53 images used for model selection. That is tuning
+performance, not an independent test; one darkened obstruction was missed in
+additional brightness/contrast/JPEG checks. A single camera does not reliably
+measure height above the floor. Details are in
+[`fat_cat_model/model-report.json`](fat_cat_model/model-report.json).
+
+To classify a saved photo on the Pi:
+
+```sh
+~/door-venv/bin/python ~/door/fat_cat_model/inference.py /path/to/photo.jpg
+```
+
+This standalone command imports PyTorch and loads the model every time. A measured
+Pi 3 run took about 18 seconds to load, followed by roughly 0.5 seconds per warmed
+prediction, including image loading and preprocessing. The running service reuses
+the loaded model. Phone capture and upload add separate latency.
+
+## Training on the Mac
+
+Training code is in [`training/`](training/README.md). Photos remain outside the
+repository under `~/Documents/code/CATDOOR_TRAINING/`:
+
+```text
+samples/
+  obstructed/
+  unobstructed/
+validation/
+  obstructed/
+  unobstructed/
+```
+
+Run the current model search from the Mac:
+
+```sh
+cd ~/Documents/PI3/door/training
+~/Documents/code/CATDOOR_TRAINING/.venv/bin/python improve_margin.py
+```
+
+Each run writes a new timestamped directory under `CATDOOR_TRAINING/training-runs/`.
+It does not replace the deployed weights. The [training README](training/README.md)
+explains selection, robustness checks, dependencies, and path overrides.
+The deployed `fat_cat_model/model.pt` and its report are committed; photo datasets,
+virtual environments, APKs, and generated training runs are not.
 
 ## Activity analytics
 
-Open **Activity graph** on the controls page (`/analytics`). Reports are computed
-on demand by `door_analytics.py`, with a simple graph, total transits, average per
-calendar day, and busiest buckets. Choose daily buckets or hour-of-day totals
-across a six-calendar-month window. The initial view is July–December 2023;
-choose Live events and an end date to inspect new activity.
+The website's **Activity graph** computes reports on demand from
+`door_events.sqlite3`. Choose **Live events** for current activity or **2023 logs**
+for the archive, an end date, and daily or hour-of-day buckets. Reports cover six
+calendar months and show total inferred transits, daily average, and busiest buckets.
+The default archive view is July–December 2023.
 
-A magnet-triggered opening counts once as an inferred `TRANSIT`. While already
-open (including scheduled opening), a new magnet burst also counts once after
-at least eight seconds without detection. Motor movement and settling are ignored,
-and closing never adds a transit. A single sensor cannot establish direction or
-confirm that the cat completed a passage. Fast return trips can merge into one event.
-`OPEN` and `CLOSE` are completed motor commands, not position feedback.
+A magnet-triggered opening counts as one inferred `TRANSIT`. While already open,
+including during scheduled or manual opening, a new magnet burst also counts
+once after eight seconds of quiet. Movement and settling are excluded. Closing
+never adds a transit. Direction is unknown, and fast return trips can merge.
+`OPEN` and `CLOSE` record completed motor commands, including startup lowering.
+Camera requests, inference scores, and model warm-up do not count as activity.
 
-Events persist in `door_events.sqlite3` alongside the script. Deploy
-`door_analytics.py` with the controller and web module, and keep the database
-writable. Logging errors are reported without stopping door control.
+The historical importer reads completed 2023 motor events and counts only
+magnet-triggered openings as transits. It ignores inference lines and raw sensor
+readings. Imports are repeatable without duplicates:
 
-The separate **one-time** importer converts 2023 completed magnet openings to
-ordinary transit events. It ignores raw magnetic readings and beam openings,
-and preserves motor open/close records. Run from this directory:
-
-```bash
-python3 import_2023.py ../door.log.1 ../door.log.2
+```sh
+cd ~/door
+~/door-venv/bin/python import_2023.py ../door.log.1 ../door.log.2
 ```
 
-Imports are repeatable without duplicates; archive and live events are separate.
-Copy the populated database to the Pi while its controller is stopped if importing
-elsewhere. No import runs at controller startup or when viewing reports.
-Old logs may have gaps: zero means no recorded events, not verified inactivity.
-Historical transit times use the logged opening completion; old records retain
-their local wall times. No website tests are added.
+Archive and live events stay separate. No import runs automatically. Empty buckets
+mean no recorded events, not proof that the cat was inactive.
 
-## Daily keep-open range
+## Pi setup and service
 
-Edit `KEEP_OPEN_START` and `KEEP_OPEN_END` near the top of `door.py`, then restart
-the script. The current settings are `"07:20"` and `"18:00"`, in the Raspberry Pi's local
-time, using 24-hour `HH:MM` format. The page displays the configured range.
+The current installation uses `/home/pi/door` for this repository and
+`/home/pi/door-venv` for its Python environment. Hardware:
 
-During this daily range the controller opens the door without needing a magnet
-and keeps it open. Website Close takes priority
-until the next schedule boundary. At the start boundary, any manual Close override
-is cleared and the door opens. At 18:00, the override is cleared and
-normal behavior resumes with a fresh 90-second minimum-open timer and the usual
-activity checks. Schedule changes are checked approximately every 1.5 seconds
-when the controller is idle.
+| Component | Connection / role |
+|---|---|
+| MLX90393 | I²C magnetic field sensor. |
+| Motor relay | BCM GPIO 27, inverted polarity. |
+| Direction relay | BCM GPIO 17. |
+| Optional break-beam sensor | BCM GPIO 22; disabled in normal startup. |
+| Phone camera | Wi-Fi HTTP uploads; no wired camera connection. |
 
-An end time equal to or earlier than the start disables this feature (for example,
-`"00:00"` to `"00:00"`). Such ranges do not wrap overnight. Startup requests a photo
-and runs the closing check before attempting the closing cycle to establish the
-door position. A movement already underway finishes before a scheduled opening.
+Enable I²C on the Pi and give the service user access to the GPIO/I²C devices.
+The restored installation uses 64-bit Raspberry Pi OS and Python 3.13. Its runtime
+dependencies are NumPy, RPi.GPIO, Adafruit Blinka, the Adafruit MLX90393 library,
+PyTorch, torchvision, and Pillow. Standard-library modules need no installation.
+Use the existing environment for routine operation; a fresh environment can be
+prepared with:
 
-`run_control_loop()` calls `update_door_state()` and waits 1.5 seconds between
-updates. Schedule transitions and recent sensor activity have separate helpers;
-the sensor's own thread remains responsible for magnetic readings.
-
-## Tests
-
-From this directory, run:
-
-```bash
-python3 -m unittest discover -s . -p 'test_*.py' -v
+```sh
+python3 -m venv ~/door-venv
+~/door-venv/bin/python -m pip install --upgrade pip
+~/door-venv/bin/python -m pip install numpy RPi.GPIO adafruit-blinka adafruit-circuitpython-mlx90393
+~/door-venv/bin/python -m pip install -r ~/door/fat_cat_model/requirements.txt \
+  --extra-index-url https://download.pytorch.org/whl/cpu
 ```
 
-The tests require NumPy (`python3 -m pip install numpy`) and use Python's
-standard-library `unittest`. The module imports normally without opening log
-files, registering signal handlers, or loading Raspberry Pi libraries. Tests
-pass fake GPIO, magnetic readings, relays, a clock, and a process-exit function
-into constructors. No background threads are started and no motor is operated.
-Tests cover import isolation, opening/closing sequences, relay polarity, the
-90-second minimum open time, continued opening while sensor activity persists,
-recent activity, calibration, and magnetic detection thresholds.
+Install the included systemd unit after placing the repository and environment
+at those paths:
 
-These regression tests describe current behavior, including exiting after the
-maximum timeout. They do not verify physical obstruction protection, motor
-interference, or reliability on real hardware. The existing tuple-identity
-comparison in `log_interval` can emit a SyntaxWarning when importing the script.
+```sh
+sudo cp ~/door/catdoor.service /etc/systemd/system/catdoor.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now catdoor
+```
 
-`main()` configures logging, selects BCM GPIO numbering, connects the real
-hardware, and starts the controller. Running `python3 door.py` on the Pi uses
-this setup. For other callers, `Relay` and `Beam` require `gpio=`, `Sensor`
-requires a `read_magnetic=` callable returning `(x, y, z)`, and `Door` requires
-`sensor=`, `motor=`, and `direction=`. `Door` wires the sensor’s `on_magnet_detected` handler itself;
-its optional `clock=` and `exit_process=` arguments default to production time
-and process-exit functions.
+The unit starts the controller at boot and restarts it after an exit. It already
+runs the website; no separate web process is needed. Stop the service before
+launching `door.py` manually, so two processes do not control the same hardware.
+The website/API have no login and are intended for the local network.
 
-## Hardware Requirements
-- Raspberry Pi
-- MLX90393 magnetic field sensor
-- Break beam sensor
-- Relay for motor control
-- Relay for direction control
+## HTTP API
 
-## Prerequisites
-- Raspberry Pi OS installed on the Raspberry Pi
-- Python 3.x installed on the Raspberry Pi
-- Required libraries installed: `time`, `board`, `adafruit_mlx90393`, `math`, `collections`, `RPi.GPIO`, and `threading`
+JSON commands use `Content-Type: application/json` and `{}` as the request body.
+For example:
 
-## How to Use
-1. Connect the hardware components (MLX90393, break beam sensor, relays) to the Raspberry Pi according to the pin assignments in the code.
-2. Install the required libraries if they are not already installed on your Raspberry Pi.
-3. Run the code on your Raspberry Pi using Python.
-4. The code will monitor the door status and log the magnetic field strength, direction, and door events to a log file (`door.log`) in the specified directory (`/home/pi/door.log`).
-5. You can customize the parameters in the code, such as the pin assignments, logging intervals, and sensor settings, to suit your specific requirements.
+```sh
+curl -H 'Content-Type: application/json' -d '{}' http://picat.local:8080/open
+curl -H 'Content-Type: application/json' -d '{}' http://picat.local:8080/close
+curl -H 'Content-Type: application/json' -d '{}' http://picat.local:8080/camera/inference
+```
 
-**Note**: This code is intended as a reference and may require modification to work with your specific hardware setup. Please refer to the documentation of the hardware components and libraries for detailed usage instructions.
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/` | Door state and controls. |
+| `POST` | `/open`, `/close` | Hold open or request closing; return `open`, `busy`, `keep_open`, `close_pending`, and `keep_closed` (always false). |
+| `POST` | `/camera/capture` | Queue a fresh phone capture; return its request ID. |
+| `GET` | `/camera/request?id=...` | Check capture status and matching image metadata. |
+| `GET` | `/camera/command` | Phone long-poll for a capture command. |
+| `POST` | `/camera` | Phone JPEG upload, with capture timestamp and optional request ID headers. |
+| `GET` | `/camera/latest`, `/camera/latest.jpg` | Latest metadata or JPEG. |
+| `POST` | `/camera/inference` | Fresh-photo check; return `clear_to_close` and `mock: false`. |
+| `GET` | `/analytics` | Six-month activity report. |
 
-Each real inference logs its predicted label, obstruction score, and decision threshold
-to both `/home/pi/door.log` and `/home/pi/door-script.log`, including website checks. Synthetic startup warm-up results are discarded.
+Only one capture can be pending at a time. Camera uploads are limited to 2 MiB.
+GET requests do not move the door. A successful Close request can remain pending
+while leaving the door open if the camera check blocks closure; inspect the state
+and logs rather than treating HTTP success as confirmation of physical position.
+
+## Troubleshooting
+
+| Symptom | Check |
+|---|---|
+| Inference takes about 30 seconds, then fails | The Pi is likely waiting for a photo. Check phone power, Wi-Fi, address, Pull mode, and Start. |
+| CLI inference starts slowly | Each invocation reloads PyTorch; the service keeps it loaded. |
+| Door stays open | Check the website hold, schedule, sensor activity, and inference result in `door.log`. |
+| Light stays off during the day | Lighting is scheduled by phone local time; night is 18:00–08:00. |
+| Website is briefly unavailable after restart | Startup lowering and settling finish before web controls start. |
+| A useful photo disappeared | Pull retention keeps five photos; copy training examples promptly. |
+
+## Code map and offline checks
+
+| File / directory | Responsibility |
+|---|---|
+| `door.py` | Hardware, movement, schedule, manual holds, control loop. |
+| `door_web.py` | Standard-library HTTP server and HTML controls. |
+| `door_camera.py`, `pull_photo.py` | Upload storage, capture commands, and request matching. |
+| `door_inference.py`, `fat_cat_model/` | Cached classifier, warm-up, and closing checks. |
+| `door_analytics.py`, `import_2023.py` | Live events, reports, historical import. |
+| `android/`, `ios/` | Native phone camera apps. |
+| `training/` | Mac training and model evaluation. |
+| `catdoor.service` | Boot/start/restart configuration. |
+
+The controller tests use fake hardware and clocks; they do not operate the door:
+
+```sh
+cd ~/door
+~/door-venv/bin/python -m unittest discover -s . -p 'test_*.py' -v
+```
+
+The model tests are separate in `training/test_classifier.py`. Tests do not replace
+physical checks of camera exposure, motor behavior, or obstruction classification.
+
+Website Close never holds the door closed: magnet opening resumes after closing.
+An active keep-open schedule can also reopen it on the next control-loop iteration.
