@@ -133,3 +133,12 @@ is applied before resizing. Push intervals are selectable and saved between runs
 10 seconds remains the default. Stop the run to change the interval. A slow photo
 or upload skips intervening timer ticks instead of overlapping or queuing work.
 Pull mode remains exclusively controlled by Pi capture requests.
+
+## Version 1.6: camera idle between Pull requests
+
+Pull mode releases the camera and its preview surface while awaiting a Pi request,
+and again immediately after receiving the captured JPEG. It opens the camera on
+request and allows 1.5 seconds of preview settling before capture; at night this
+also serves as the light warm-up. Camera errors, Stop, and frame timeout release it.
+Push mode keeps its preview for periodic captures. Networking and wake locks remain
+active so Pull requests can still arrive while the screen sleeps.

@@ -102,7 +102,7 @@ public final class CameraService extends Service {
             intervalMillis = Math.max(1, Math.min(60, settings.getInt("intervalSeconds", 10))) * 1000;
             size = settings.getFloat("size", 1); x = settings.getFloat("x", .5f); y = settings.getFloat("y", .5f);
             client = new PiClient(settings.getString("address", "http://pi3:8080").replaceAll("/+$", ""));
-            openCamera();
+            if (!pull) openCamera();
             running = true;
             generation++;
             status = pull ? "Pull: waiting for Pi (screen may sleep)" : "Push: every " + (intervalMillis / 1000) + " seconds (screen may sleep)";
@@ -119,8 +119,7 @@ public final class CameraService extends Service {
         busy = awaitingFrame = false;
         handler.removeCallbacksAndMessages(null);
         if (client != null) { client.cancel(); client = null; }
-        if (camera != null) { updateCameraLight(); camera.setPreviewCallback(null); camera.release(); camera = null; }
-        if (surface != null) { surface.release(); surface = null; }
+        releaseCamera();
         if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();
         if (cpuLock != null && cpuLock.isHeld()) cpuLock.release();
         light = "Camera light off";
@@ -128,6 +127,21 @@ public final class CameraService extends Service {
         stopForeground(true);
         notifyScreen();
         stopSelf();
+    }
+
+    /** Release the sensor and preview surface so Pull mode can wait without camera work. */
+    private void releaseCamera() {
+        awaitingFrame = false;
+        updateCameraLight();
+        if (camera != null) {
+            try { camera.setPreviewCallback(null); }
+            finally {
+                try { camera.release(); }
+                finally { camera = null; }
+            }
+        }
+        if (surface != null) { surface.release(); surface = null; }
+        light = "Camera light off";
     }
 
     /** Release resources even if Android stops the service. */
@@ -218,10 +232,20 @@ public final class CameraService extends Service {
     private void capture(String requestId, int run) {
         if (!running || generation != run || busy) return;
         busy = awaitingFrame = true;
+        boolean reopened = camera == null;
+        try {
+            if (reopened) openCamera();
+        } catch (Exception error) {
+            busy = false;
+            releaseCamera();
+            if (pull) retry(run, "Could not open camera: " + error.getMessage());
+            else { status = "Could not open camera: " + error.getMessage(); notifyScreen(); }
+            return;
+        }
         boolean illuminated = updateCameraLight();
         notifyScreen();
         int capture = ++captureSequence;
-        if (illuminated) handler.postDelayed(() -> takePhoto(requestId, run, capture), 1500);
+        if (illuminated || reopened) handler.postDelayed(() -> takePhoto(requestId, run, capture), 1500);
         else takePhoto(requestId, run, capture);
     }
 
@@ -234,8 +258,11 @@ public final class CameraService extends Service {
                 awaitingFrame = false;
                 updateCameraLight();
                 notifyScreen();
-                try { source.startPreview(); }
-                catch (RuntimeException error) { stopCapture("Camera preview restart failed: " + error.getMessage()); return; }
+                if (pull) releaseCamera();
+                else {
+                    try { source.startPreview(); }
+                    catch (RuntimeException error) { stopCapture("Camera preview restart failed: " + error.getMessage()); return; }
+                }
                 SimpleDateFormat formatter = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US);
                 formatter.setTimeZone(TimeZone.getTimeZone("UTC"));
                 String capturedAt = formatter.format(new Date());
@@ -272,6 +299,7 @@ public final class CameraService extends Service {
         } catch (RuntimeException error) {
             busy = awaitingFrame = false;
             updateCameraLight();
+            if (pull) releaseCamera();
             if (pull) retry(run, "Camera capture failed: " + error.getMessage());
             else { status = "Camera capture failed: " + error.getMessage(); notifyScreen(); }
             return;
@@ -339,6 +367,7 @@ public final class CameraService extends Service {
      *     boolean: Whether the camera torch is enabled for this capture.
      */
     private boolean updateCameraLight() {
+        if (camera == null) { light = "Camera light off"; return false; }
         int hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY);
         boolean illuminate = running && awaitingFrame && (hour >= 18 || hour < 8);
         try {
