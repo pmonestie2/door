@@ -1,27 +1,23 @@
-Current deployed model: RGB, 384×384, 2×2 average pooling; threshold 0.012446273351088166. Retrained with the two debris images; 51/51 tuning images pass. See `model-report.json`. Older deployment notes below are historical.
+# Deployed obstruction model
 
-## Deployed model (2026-10-05)
+`model.pt` contains the deployed PyTorch weights and all inference settings.
+`model-report.json` records selection metrics and the dataset filenames.
 
-`model.pt` and `inference.py` now use grayscale histogram equalization, 384×384 letterboxing, and 2×2 average pooling. The checkpoint supplies all inference settings, including threshold 0.1991468444466591. It passed all 49 tuning images (10 obstructed, 39 clear). See `model-report.json` for details. This is not independent test performance. The prior model and inference code are retained in `backups/`.
-
-The legacy ONNX files and their `model-config.json` describe the older model; the door uses the PyTorch checkpoint directly.
-
-# Cat-door inference
-
-Run from the door directory:
+On the Pi:
 
 ```sh
-python3 fat_cat_model/inference.py /path/to/photo.jpg
+~/door-venv/bin/python ~/door/fat_cat_model/inference.py /path/to/photo.jpg
 ```
 
-The model path defaults to `model.pt` beside the script, regardless of the working directory. Output is JSON containing `label`, `obstructed_score`, and `threshold`. The score is not a calibrated probability. The checkpoint supplies the selected threshold, pooling, and input size.
+The controller loads this model once, warms it in a background thread, then
+reuses it for website checks and checks before normal closing. Its current input
+is RGB letterboxed to 384×384, with a frozen MobileNetV3-Small backbone, 2×2
+average pooling, and a linear head. Threshold: 0.8172647356987.
 
-For repeated inference, load once:
+The 53 tuning images pass, but a darkened obstruction was missed in additional
+perturbation checks. Scores are uncalibrated and tuning results are not independent
+test performance. Refer to `../training/README.md` for Mac training commands.
 
-```python
-from fat_cat_model.inference import Classifier
-classifier = Classifier()
-result = classifier.predict('/path/to/photo.jpg')
-```
-
-Dependencies are listed in `requirements.txt`. PyTorch/TorchVision installation and inference latency have not yet been verified on the Pi 3. Inference runs on CPU and does not download weights. An invalid image or checkpoint raises an exception; it does not return a clear-door result.
+The obsolete ONNX implementation and redundant model backups were removed.
+Git retains committed model versions. Training outputs remain on the Mac until
+explicitly deployed with matching inference settings.

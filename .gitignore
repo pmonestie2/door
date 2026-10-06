@@ -18,3 +18,9 @@ android/.idea/
 \#*\#
 *.apk
 fat_cat_model/backups/
+
+# Training data and generated runs stay outside version control
+training/.venv/
+training/samples/
+training/validation/
+training/training-runs/
