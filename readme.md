@@ -1,12 +1,26 @@
 # Cat door
 
 A Raspberry Pi controller for a motorized cat door, with a small website, a phone
-camera, obstruction detection, and passage analytics. The Pi controls the motor
-and reads the magnet sensor. The phone supplies photos; model inference runs on
-the Pi. Training runs separately on the Mac.
+camera, obstruction detection, and passage analytics.
+That cat has a magnet attached to his colar. A very cheap magnet detector is used to sense cat presence:
+The reason is that magnet detectors are much more sensitive then RFID where as you would need a powerful antena.
+This cat door is meant to prevent racoons which can "destroy/enter" a regular catdoor (even RFID): This one is a vertical door with an actuator.
+The Pi controls all the logic, the mortor and the magnet sensor.
+The phone supplies photos so that there is no blockage to close the door: you don't want to close while the cat is in the tunnel.
+A phone is used instead of a camera because this is what I had!!!
+
+![Cat door setup](docs/cat-door.jpg)
+
+
+
+
+Training ran separately on a Mac - A simple binary classifier.
 
 The current installation is a **Raspberry Pi 3 running 64-bit Raspberry Pi OS**,
-hostname **`picat`**, with a Nexus 5X camera. An iPhone app is also included.
+with an old Nexus 5X camera. An iPhone app is also included.
+
+In normal operation the pi will boot, start door.py and listen for magenet even - To be noted that the magnet baselines itself: this is important as
+if the magnet is moved and such it would change calibration data. so routinely the app self calibrate (when there is no cat).
 
 ## Everyday commands
 
@@ -72,7 +86,7 @@ Python does not reload edits automatically.
 | `OPEN_MIN_TIME` | `20` | Seconds after opening and settling before automatic closing is eligible. |
 | `CLOSE_CHECK_INTERVAL` | `10` | Minimum seconds after a closing check finishes before requesting another photo. |
 
-**The current schedule is disabled**, because its end is earlier than its start.
+
 To keep the door open from 08:00 to 18:00, set those two times explicitly. Times
 use the Pi's local timezone and 24-hour `HH:MM` format. An end equal to or earlier
 than the start disables the schedule; intervals do not wrap overnight.
@@ -92,7 +106,7 @@ Install either the [Android app](android/README.md) or the
 [iPhone app](ios/README.md), enter the Pi server address, frame/crop the doorway,
 select **Pull**, and tap **Start**.
 
-- **Pull:** the phone waits for a Pi request, takes a fresh photo, and uploads it.
+- **Pull:** the phone waits for a Pi request, takes a fresh photo, and uploads it to the pi (there is a websocket kept oopen)
   This is the mode required for automatic obstruction checks.
 - **Push:** the phone takes photos periodically, useful for gathering training
   images. Android offers intervals from 1 to 60 seconds; iPhone uses 10 seconds.
