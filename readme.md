@@ -7,10 +7,11 @@ My area has a lot of racoons - A vertical cat door exists, it was about 600$ las
 Solution: A Raspberry Pi controller for a actuator based vertical door
 The cat carries a 1$ magnet - The detector, a very cheap magnetic field reader (MLX90393) has the advantage over RFID to have great range. In order for RFID to get range you needs a big antenna. No space and time to do this.
 
-A slight complication: My cat (we call him bigcat) likes to hang at the door  (see pic below)
-Given the actuator was an cheap, non custom made actuator from amazon, it is very powerfull. So if he starts sleeping in the tunnel (in that case magneting field will stabilize) there is no way to know that the door will not "guillotine" the cat...
+A **slight** complication: My cat (we call him bigcat) likes to hang at the door  (see pic below)
+Given the actuator was a cheap, non custom made actuator from amazon, it is very powerfull. So if bigcat starts sleeping in the tunnel (in that case the magnetic field will stabilize) there is no way to know that the door will not "guillotine" the cat...
+Before you ask: cheap IR detector is a pain and don't have, afaik wide view (I tried).
 
-Solution 2: an old android phone with an app installed on it. Can be piloted by the RPI - On top of that a custom made, CNN based binary classifier to detect if there is obstruction on the path to the door.
+Solution 2: an old android phone with an app installed on it. Can be piloted by the RPI to take picture before closing the door (when the PI detects no magnetic field change) - On top of that, a custom made, CNN based binary classifier, to detect if there is obstruction on the closing path of the door.
 
 The Pi controls all the logic, the mortor, the magnet sensor, the phone camera and finally the obstruction model.
 
