@@ -34,7 +34,7 @@ PIN or Google account verification after factory reset.
 After **Start**, capture runs in a foreground service with an ongoing notification.
 The screen can sleep, the phone can be locked, and you can leave the app without
 stopping Push/Pull capture. **Stop** in the app or notification releases the camera,
-light, CPU wake lock, and Wi-Fi lock. Reopening the app shows the current run;
+light, and CPU wake lock. Reopening the app shows the current run;
 it does not start a second one. The crop preview is available while stopped; during
 a run, the screen displays the latest captured crop.
 
@@ -120,7 +120,7 @@ Version 1.1 changes the default server to `http://pi3:8080` and migrates the old
 
 Capture and uploads now live in `CameraService`, with an offscreen preview surface
 and fresh sensor-frame callbacks. They do not depend on a visible TextureView.
-The app requests a camera foreground service, a partial CPU wake lock, a Wi-Fi lock,
+The app requests a camera foreground service, a partial CPU wake lock,
 and (on newer Android) notification permission. No Photos/storage permissions are
 added. The user can request a battery optimization exemption for reliable delivery
 while idle. Background camera access on newer Android requires starting the run
@@ -140,5 +140,11 @@ Pull mode releases the camera and its preview surface while awaiting a Pi reques
 and again immediately after receiving the captured JPEG. It opens the camera on
 request and allows 1.5 seconds of preview settling before capture; at night this
 also serves as the light warm-up. Camera errors, Stop, and frame timeout release it.
-Push mode keeps its preview for periodic captures. Networking and wake locks remain
+Push mode keeps its preview for periodic captures. Networking and the CPU wake lock remain
 active so Pull requests can still arrive while the screen sleeps.
+
+## Version 1.7: Wi-Fi power saving
+
+Removed the high-performance Wi-Fi lock and unused Wi-Fi permissions. Android can
+manage Wi-Fi power normally between requests. The CPU wake lock remains active
+during a run for screen-off operation.

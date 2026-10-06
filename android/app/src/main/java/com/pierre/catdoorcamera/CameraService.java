@@ -7,7 +7,6 @@ import android.content.SharedPreferences;
 import android.content.pm.ServiceInfo;
 import android.graphics.*;
 import android.hardware.Camera;
-import android.net.wifi.WifiManager;
 import android.os.*;
 import org.json.JSONObject;
 import java.io.ByteArrayOutputStream;
@@ -29,7 +28,6 @@ public final class CameraService extends Service {
     private SurfaceTexture surface;
     private PiClient client;
     private PowerManager.WakeLock cpuLock;
-    private WifiManager.WifiLock wifiLock;
     private Listener listener;
     private boolean running, busy, pull, awaitingFrame;
     private int generation, captureSequence, width, height, rotation, uploaded;
@@ -69,7 +67,7 @@ public final class CameraService extends Service {
         return START_NOT_STICKY;
     }
 
-    /** Publish an ongoing notification, acquire screen-off locks, and start the chosen mode. */
+    /** Publish an ongoing notification, acquire the CPU wake lock, and start the chosen mode. */
     @SuppressLint("WakelockTimeout") // Held only during a user-started run; stop and destruction release it.
     private void startCapture() {
         try {
@@ -94,9 +92,6 @@ public final class CameraService extends Service {
             PowerManager power = (PowerManager) getSystemService(POWER_SERVICE);
             cpuLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "CatDoorCamera:Capture");
             cpuLock.acquire();
-            WifiManager wifi = (WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
-            wifiLock = wifi.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "CatDoorCamera:Wifi");
-            wifiLock.acquire();
             SharedPreferences settings = getSharedPreferences("camera", MODE_PRIVATE);
             pull = settings.getBoolean("pull", false);
             intervalMillis = Math.max(1, Math.min(60, settings.getInt("intervalSeconds", 10))) * 1000;
@@ -112,7 +107,7 @@ public final class CameraService extends Service {
         } catch (Exception error) { stopCapture("Could not start: " + error.getMessage()); }
     }
 
-    /** Cancel network work and release the camera, torch, notification, and power locks. */
+    /** Cancel network work and release the camera, torch, notification, and CPU wake lock. */
     private void stopCapture(String message) {
         running = false;
         generation++;
@@ -120,7 +115,6 @@ public final class CameraService extends Service {
         handler.removeCallbacksAndMessages(null);
         if (client != null) { client.cancel(); client = null; }
         releaseCamera();
-        if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();
         if (cpuLock != null && cpuLock.isHeld()) cpuLock.release();
         light = "Camera light off";
         status = message;
