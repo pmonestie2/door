@@ -5,7 +5,7 @@ The task at hand: I needed a racoon proof cat door for my garage - Cheap amazon 
 My area has a lot of racoons - A vertical cat door exists, it was about 600$ last time I checked.
 
 Solution: A Raspberry Pi controller for a actuator based vertical door
-The cat carries a 1$ magnet - The detector, a very cheap magneting field reader (MLX90393) has the advantage over RFID to have great range. RFID to get range needs a big antenna.
+The cat carries a 1$ magnet - The detector, a very cheap magnetic field reader (MLX90393) has the advantage over RFID to have great range. In order for RFID to get range you needs a big antenna. No space and time to do this.
 
 A slight complication: My cat (we call him bigcat) likes to hang at the door  (see pic below)
 Given the actuator was an cheap, non custom made actuator from amazon, it is very powerfull. So if he starts sleeping in the tunnel (in that case magneting field will stabilize) there is no way to know that the door will not "guillotine" the cat...
