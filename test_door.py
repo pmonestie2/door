@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from pathlib import Path
 import subprocess
 import sys
+import time
 import unittest
 from unittest.mock import Mock, call, patch
 
@@ -21,7 +22,8 @@ class ControllerTests(unittest.TestCase):
         self.module = door
         self.now = 1000.0
         self.clock = SimpleNamespace(
-            time=lambda: self.now, sleep=Mock(side_effect=self.advance))
+            time=lambda: self.now, sleep=Mock(side_effect=self.advance),
+            localtime=time.gmtime)
         self.exit_process = Mock(side_effect=StopLoop)
         self.gpio = SimpleNamespace(OUT=0, setup=Mock(), output=Mock())
         self.module.type_to_logtime.clear()
@@ -47,30 +49,299 @@ assert not {'board', 'adafruit_mlx90393', 'RPi.GPIO'} & sys.modules.keys()
 
     def test_sensor_reads_from_supplied_reader(self):
         reader = Mock(return_value=(12, 34, 56))
-        sensor = self.module.Sensor(callback=Mock(), read_magnetic=reader)
+        sensor = self.module.Sensor(on_magnet_detected=Mock(), read_magnetic=reader)
         sensor.read_sensor()
         reader.assert_called_once_with()
         sample = sensor.value_lookback[-1]
         self.assertEqual((sample.x, sample.y, sample.z), (12, 34, 56))
 
-    def test_sensor_callback_opens_its_door(self):
+    def test_on_magnet_detected_opens_its_door(self):
         controller = self.make_door()
-        controller.sensor.callback()
+        controller.sensor.on_magnet_detected()
         self.assertTrue(controller.open)
         self.assertEqual(controller.motor.trig.call_args_list,
                          [call(True), call(False)])
 
-    def make_door(self):
+    def make_door(self, keep_open_start="00:00", keep_open_end="00:00"):
+        """Returns:
+            Door: A controller with fake hardware and the given daily keep-open range.
+        """
         sensor = self.make_sensor()
         sensor.force_calibration = Mock()
         return self.module.Door(sensor=sensor, motor=Mock(), direction=Mock(),
-                                clock=self.clock, exit_process=self.exit_process)
+                                clock=self.clock, exit_process=self.exit_process,
+                                keep_open_start=keep_open_start,
+                                keep_open_end=keep_open_end,
+                                close_check=Mock(return_value=True))
 
-    def check_closing_once(self, door):
-        # The controller's final sleep ends this iteration; movement is mocked.
-        with patch.object(self.clock, "sleep", side_effect=StopLoop):
-            with self.assertRaises(StopLoop):
-                door.read_sensor_thread()
+    def test_close_checks_photo_before_motor_including_website_and_startup(self):
+        """Every closing path must receive a clear result before running the motor."""
+        for source, force in (("automatic", False), ("website", False),
+                              ("automatic", True)):
+            with self.subTest(source=source, force=force):
+                controller = self.make_door()
+                controller.open = True
+                events = Mock()
+                events.attach_mock(controller.close_check, "check")
+                events.attach_mock(controller.motor, "motor")
+                controller.close_door(source=source, force=force)
+                self.assertEqual(events.mock_calls,
+                                 [call.check(), call.motor.trig(True), call.motor.trig(False)])
+
+    def test_failed_check_keeps_open_and_retries_with_another_photo(self):
+        """Blocked, unavailable, and invalid results never energize the motor."""
+        for result in (False, None, TimeoutError("phone offline"), RuntimeError("model failed")):
+            with self.subTest(result=result):
+                controller = self.make_door()
+                controller.open = True
+                controller.close_check.side_effect = [result, True]
+                controller.close_door()
+                controller.close_door()
+                controller.motor.trig.assert_not_called()
+                self.assertTrue(controller.open)
+                self.assertFalse(controller.movement_lock.locked())
+                self.assertEqual(controller.close_check.call_count, 1)
+                self.advance(5)
+                controller.close_door()
+                self.assertFalse(controller.open)
+                self.assertEqual(controller.close_check.call_count, 2)
+
+    def test_sensor_activity_during_capture_prevents_automatic_close(self):
+        """Recheck sensors after waiting for the phone."""
+        controller = self.make_door()
+        controller.open = True
+
+        def capture():
+            """Returns:
+                bool: A clear image after a new magnet event.
+            """
+            controller.sensor.magnet_time = self.now
+            return True
+
+        controller.close_check.side_effect = capture
+        controller.close_door()
+        controller.motor.trig.assert_not_called()
+
+    def test_website_open_cancels_close_while_waiting_for_photo(self):
+        """An Open command received during capture cancels the pending closing."""
+        controller = self.make_door()
+        controller.open = True
+
+        def capture():
+            """Returns:
+                bool: A clear image after the user cancels closing.
+            """
+            controller.open_door(source="website")
+            return True
+
+        controller.close_check.side_effect = capture
+        controller.close_door(source="website")
+        controller.motor.trig.assert_not_called()
+        self.assertFalse(controller.website_closed)
+
+    def test_schedule_start_during_capture_prevents_close(self):
+        """Honor a schedule boundary crossed while waiting for a photo."""
+        self.now = 8 * 3600 - 5
+        controller = self.make_door(keep_open_start="08:00", keep_open_end="18:00")
+        controller.open = True
+
+        def capture():
+            """Returns:
+                bool: A clear image received after the schedule starts.
+            """
+            self.advance(10)
+            return True
+
+        controller.close_check.side_effect = capture
+        controller.close_door()
+        controller.motor.trig.assert_not_called()
+
+    def test_daily_schedule_boundaries(self):
+        controller = self.make_door(keep_open_start="08:00", keep_open_end="18:00")
+        for seconds, active in ((8*3600-1, False), (8*3600, True),
+                                (18*3600-1, True), (18*3600, False),
+                                (86400+8*3600, True)):
+            with self.subTest(seconds=seconds):
+                self.now = seconds
+                self.assertEqual(controller.is_scheduled_open(), active)
+        self.assertEqual(controller.schedule_description(), "08:00–18:00")
+
+    def test_nonpositive_schedule_interval_preserves_normal_closing(self):
+        for start, end in (("08:00", "08:00"), ("18:00", "08:00")):
+            with self.subTest(start=start, end=end):
+                self.now = 12*3600
+                controller = self.make_door(keep_open_start=start, keep_open_end=end)
+                controller.open = True
+                controller.open_time = self.now - 100
+                controller.close_door = Mock()
+                self.assertFalse(controller.is_scheduled_open())
+                controller.update_door_state()
+                controller.close_door.assert_called_once_with()
+
+    def test_schedule_opens_closed_door_without_magnet(self):
+        self.now = 8*3600
+        controller = self.make_door(keep_open_start="08:00", keep_open_end="18:00")
+        controller.open = False
+        controller.open_door = Mock()
+        controller.close_door = Mock()
+        controller.update_door_state()
+        controller.open_door.assert_called_once_with(source="schedule")
+        controller.close_door.assert_not_called()
+
+    def test_schedule_prevents_closing_and_maximum_timeout(self):
+        self.now = 12*3600
+        controller = self.make_door(keep_open_start="08:00", keep_open_end="18:00")
+        controller.open = True
+        controller.open_time = 8*3600
+        controller.sensor.magnet = True
+        controller.close_door()  # Automatic closing must respect the schedule.
+        controller.update_door_state()
+        controller.motor.trig.assert_not_called()
+        self.exit_process.assert_not_called()
+
+    def test_schedule_end_restarts_normal_timers(self):
+        self.now = 18*3600-1
+        controller = self.make_door(keep_open_start="08:00", keep_open_end="18:00")
+        controller.open = True
+        controller.open_time = 8*3600
+        controller.close_door = Mock()
+        controller.update_door_state()
+        self.now += 1
+        controller.update_door_state()
+        self.assertEqual(controller.open_time, self.now)
+        controller.close_door.assert_not_called()
+        self.now += 90.1
+        controller.update_door_state()
+        controller.close_door.assert_called_once_with()
+        self.exit_process.assert_not_called()
+
+    def test_website_close_overrides_schedule_and_sensor_triggers(self):
+        self.now = 12*3600
+        controller = self.make_door(keep_open_start="08:00", keep_open_end="18:00")
+        controller.open = True
+        controller.close_door(source="website")
+        self.assertFalse(controller.open)
+        self.assertTrue(controller.website_closed)
+        controller.motor.reset_mock()
+        controller.open_door_from_magnet()
+        controller.open_door_from_beam()
+        controller.update_door_state()
+        self.now += 60
+        controller.update_door_state()
+        controller.motor.trig.assert_not_called()
+        self.exit_process.assert_not_called()
+
+    def test_website_open_clears_close_override(self):
+        controller = self.make_door()
+        controller.close_door(source="website")
+        controller.open_door(source="website")
+        self.assertFalse(controller.website_closed)
+        self.assertTrue(controller.open)
+        self.assertEqual(controller.motor.trig.call_args_list, [call(True), call(False)])
+
+    def test_next_schedule_start_clears_manual_close_and_opens(self):
+        self.now = 7*3600
+        controller = self.make_door(keep_open_start="08:00", keep_open_end="18:00")
+        controller.close_door(source="website")
+        self.now = 8*3600
+        controller.update_door_state()
+        self.assertFalse(controller.website_closed)
+        self.assertTrue(controller.open)
+
+    def test_next_schedule_end_clears_manual_close_and_restores_sensors(self):
+        self.now = 12*3600
+        controller = self.make_door(keep_open_start="08:00", keep_open_end="18:00")
+        controller.close_door(source="website")
+        self.now = 18*3600
+        controller.update_door_state()
+        self.assertFalse(controller.website_closed)
+        controller.motor.trig.assert_not_called()
+        controller.open_door_from_magnet()
+        self.assertTrue(controller.open)
+
+    def test_midnight_does_not_expire_manual_close(self):
+        self.now = 23*3600
+        controller = self.make_door(keep_open_start="08:00", keep_open_end="18:00")
+        controller.close_door(source="website")
+        self.now = 86400
+        controller.update_door_state()
+        self.assertTrue(controller.website_closed)
+        controller.motor.trig.assert_not_called()
+
+    def test_skipped_schedule_boundaries_still_expire_manual_close(self):
+        self.now = 12*3600
+        controller = self.make_door(keep_open_start="08:00", keep_open_end="18:00")
+        controller.close_door(source="website")
+        self.now += 86400
+        controller.update_door_state()
+        self.assertFalse(controller.website_closed)
+        self.assertTrue(controller.open)
+
+    def test_website_close_at_boundary_overrides_that_schedule_period(self):
+        self.now = 7*3600
+        controller = self.make_door(keep_open_start="08:00", keep_open_end="18:00")
+        self.now = 8*3600
+        controller.close_door(source="website")
+        controller.update_door_state()
+        self.assertTrue(controller.website_closed)
+        controller.motor.trig.assert_not_called()
+
+    def test_disabled_schedule_keeps_manual_close_across_days(self):
+        controller = self.make_door()
+        controller.close_door(source="website")
+        self.now += 2*86400
+        controller.update_door_state()
+        self.assertTrue(controller.website_closed)
+
+    def test_control_loop_updates_then_waits(self):
+        controller = self.make_door()
+        events = Mock()
+        controller.update_door_state = events.update
+        events.attach_mock(self.clock.sleep, "sleep")
+        self.clock.sleep.side_effect = StopLoop
+        with self.assertRaises(StopLoop):
+            controller.run_control_loop()
+        self.assertEqual(events.mock_calls, [call.update(), call.sleep(1.5)])
+
+    def test_website_close_is_deferred_during_opening(self):
+        controller = self.make_door(keep_open_start="08:00", keep_open_end="18:00")
+        self.now = 12*3600
+
+        def request_close_during_sleep(seconds):
+            if seconds == 13:
+                controller.close_door(source="website")
+            self.advance(seconds)
+
+        with patch.object(self.clock, "sleep", side_effect=request_close_during_sleep):
+            controller.open_door()
+        self.assertTrue(controller.website_closed)
+        self.assertTrue(controller.open)
+        self.assertEqual(controller.motor.trig.call_args_list, [call(True), call(False)])
+
+        controller.update_door_state()
+        self.assertFalse(controller.open)
+        self.assertEqual(controller.motor.trig.call_args_list,
+                         [call(True), call(False), call(True), call(False)])
+
+    def test_new_controller_has_no_website_override(self):
+        controller = self.make_door()
+        controller.close_door(source="website")
+        self.assertFalse(self.make_door().website_closed)
+
+    def test_startup_can_home_door_during_schedule(self):
+        self.now = 12*3600
+        controller = self.make_door(keep_open_start="08:00", keep_open_end="18:00")
+        controller.open = True
+        controller.close_door(force=True)
+        self.assertFalse(controller.open)
+        self.assertEqual(controller.motor.trig.call_args_list,
+                         [call(True), call(False)])
+
+    def test_schedule_rejects_invalid_times(self):
+        for value in ("8:00", "24:00", "12:60", "-1:00", "08:00pm"):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    self.make_door(keep_open_start=value)
 
     def test_minimum_open_time(self):
         for elapsed, should_close in ((0, False), (89.9, False),
@@ -80,7 +351,7 @@ assert not {'board', 'adafruit_mlx90393', 'RPi.GPIO'} & sys.modules.keys()
                 door.open = True
                 door.open_time = self.now - elapsed
                 door.close_door = Mock()
-                self.check_closing_once(door)
+                door.update_door_state()
                 self.assertEqual(door.close_door.called, should_close)
                 self.exit_process.assert_not_called()
 
@@ -98,7 +369,7 @@ assert not {'board', 'adafruit_mlx90393', 'RPi.GPIO'} & sys.modules.keys()
                     else:
                         door.beam.broken = active
                         door.beam.broken_time = self.now - age
-                    self.check_closing_once(door)
+                    door.update_door_state()
                     self.assertEqual(door.close_door.called,
                                      not active and age >= 8)
 
@@ -111,7 +382,11 @@ assert not {'board', 'adafruit_mlx90393', 'RPi.GPIO'} & sys.modules.keys()
                 door.open_time = self.now - elapsed
                 door.sensor.magnet = True
                 door.close_door = Mock()
-                self.check_closing_once(door)
+                if elapsed > 500:
+                    with self.assertRaises(StopLoop):
+                        door.update_door_state()
+                else:
+                    door.update_door_state()
                 door.close_door.assert_not_called()
                 if elapsed > 500:
                     self.exit_process.assert_called_once_with(1)
@@ -125,7 +400,7 @@ assert not {'board', 'adafruit_mlx90393', 'RPi.GPIO'} & sys.modules.keys()
                 door.open, door.lock = opened, locked
                 door.open_time = self.now - 100
                 door.close_door = Mock()
-                self.check_closing_once(door)
+                door.update_door_state()
                 door.close_door.assert_not_called()
 
     def test_open_motor_sequence_and_timer_start(self):
@@ -183,7 +458,10 @@ assert not {'board', 'adafruit_mlx90393', 'RPi.GPIO'} & sys.modules.keys()
                                   call(27, off_level)])
 
     def make_sensor(self):
-        sensor = self.module.Sensor(callback=Mock(), read_magnetic=Mock(return_value=(100, 0, 0)))
+        """Returns:
+            Sensor: A sensor with a fake reader and a fixed magnetic baseline.
+        """
+        sensor = self.module.Sensor(on_magnet_detected=Mock(), read_magnetic=Mock(return_value=(100, 0, 0)))
         sensor.avg = np.array([100.0, 0.0, 0.0])
         sensor.avg_norm = 100.0
         return sensor

@@ -1,0 +1,20 @@
+__pycache__/
+door_events.sqlite3
+door_events.sqlite3-*
+camera_images/
+ios/**/xcuserdata/
+ios/**/DerivedData/
+android/.gradle/
+android/**/build/
+android/local.properties
+android/.idea/
+
+# Editor, OS, and build artifacts
+.DS_Store
+._*
+.idea/
+*.iml
+*~
+\#*\#
+*.apk
+fat_cat_model/backups/
