@@ -201,17 +201,9 @@ never adds a transit. Direction is unknown, and fast return trips can merge.
 `OPEN` and `CLOSE` record completed motor commands, including startup lowering.
 Camera requests, inference scores, and model warm-up do not count as activity.
 
-The historical importer reads completed 2023 motor events and counts only
-magnet-triggered openings as transits. It ignores inference lines and raw sensor
-readings. Imports are repeatable without duplicates:
-
-```sh
-cd ~/door
-~/door-venv/bin/python import_2023.py ../door.log.1 ../door.log.2
-```
-
-Archive and live events stay separate. No import runs automatically. Empty buckets
-mean no recorded events, not proof that the cat was inactive.
+The previously imported 2023 archive remains in the database, separate from live
+events. The one-time import script has been removed. Empty buckets mean no
+recorded events, not proof that the cat was inactive.
 
 ## Pi setup and service
 
@@ -302,7 +294,7 @@ and logs rather than treating HTTP success as confirmation of physical position.
 | `door_web.py` | Standard-library HTTP server and HTML controls. |
 | `door_camera.py`, `pull_photo.py` | Upload storage, capture commands, and request matching. |
 | `door_inference.py`, `fat_cat_model/` | Cached classifier, warm-up, and closing checks. |
-| `door_analytics.py`, `import_2023.py` | Live events, reports, historical import. |
+| `door_analytics.py` | Live events and reports, including the existing archive. |
 | `android/`, `ios/` | Native phone camera apps. |
 | `training/` | Mac training and model evaluation. |
 | `catdoor.service` | Boot/start/restart configuration. |

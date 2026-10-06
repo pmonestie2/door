@@ -1,4 +1,4 @@
-"""Tests for transit counting and historical conversion, without a web server."""
+"""Tests for transit counting and reports, without a web server."""
 
 from datetime import datetime
 from pathlib import Path
@@ -7,7 +7,6 @@ import unittest
 from unittest.mock import Mock
 
 from door_analytics import Analytics
-from import_2023 import import_logs
 from door import Door
 
 
@@ -56,20 +55,6 @@ class AnalyticsTests(unittest.TestCase):
         clock.time.return_value += 10
         controller.open_door_from_magnet()
         self.assertEqual(self.total(), 2)
-
-    def test_import_counts_only_magnet_openings_and_is_repeatable(self):
-        path = Path(self.temp.name) / "door.log"
-        path.write_text("\n".join([
-            "[Tue Aug  1 12:00:00 2023] [magnet] magnet detected",
-            "[Tue Aug  1 12:00:13 2023] door opened source=magnet",
-            "[Tue Aug  1 12:00:16 2023] [magnet] magnet detected",
-            "[Tue Aug  1 12:01:00 2023] door closed",
-            "[Tue Aug  1 13:00:13 2023] door opened source=beam",
-            "[Thu Aug  1 12:00:13 2024] door opened source=magnet"]))
-        import_logs(self.analytics, [path, path])
-        import_logs(self.analytics, [path])
-        self.assertEqual(self.total("archive"), 1)
-        self.assertEqual(self.total("live"), 0)
 
     def test_six_month_window_and_buckets(self):
         for day in ("2023-06-30", "2023-07-01", "2023-12-31", "2024-01-01"):
