@@ -2,6 +2,7 @@
 
 from io import BytesIO
 import threading
+import time
 
 from door_camera import DEFAULT_DIRECTORY
 from pull_photo import pull_photo
@@ -24,7 +25,7 @@ def _get_classifier():
     return _classifier
 
 
-def run_inference(image):
+def run_inference(image, log_message=print):
     """Returns:
         bool: Whether the trained classifier labels these JPEG bytes unobstructed.
 
@@ -36,10 +37,30 @@ def run_inference(image):
         raise ValueError("Cannot run inference without an image")
     with _inference_lock:
         result = _get_classifier().predict(BytesIO(image))
+    log_message("inference: result=%s score=%.6f threshold=%.6f" %
+                (result["label"], result["obstructed_score"], result["threshold"]))
     return result["label"] == "unobstructed"
 
 
-def check_before_close():
+def warm_up_model(log_message=print):
+    """Load and warm the cached model with a synthetic image; log readiness or failure."""
+    started = time.monotonic()
+    log_message("warming up obstruction model")
+    try:
+        from PIL import Image
+        image = BytesIO()
+        Image.new("RGB", (384, 384), (124, 116, 104)).save(image, format="JPEG")
+        # Uses the same lock and classifier as real checks; the result is discarded.
+        image.seek(0)
+        with _inference_lock:
+            _get_classifier().predict(image)
+    except Exception as error:
+        log_message("model warm-up failed: %s" % error)
+        return
+    log_message("obstruction model ready in %.1f seconds" % (time.monotonic() - started))
+
+
+def check_before_close(log_message=print):
     """Request a new photo and run inference on that exact saved upload.
 
     Returns:
@@ -53,4 +74,4 @@ def check_before_close():
     """
     metadata = pull_photo()
     image = (DEFAULT_DIRECTORY / metadata["filename"]).read_bytes()
-    return run_inference(image)
+    return run_inference(image, log_message=log_message)

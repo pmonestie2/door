@@ -74,7 +74,7 @@ assert not {'board', 'adafruit_mlx90393', 'RPi.GPIO'} & sys.modules.keys()
                                 keep_open_end=keep_open_end,
                                 close_check=Mock(return_value=True))
 
-    def test_close_checks_photo_before_motor_including_website_and_startup(self):
+    def test_close_checks_photo_before_motor_including_website_and_force(self):
         """Every closing path must receive a clear result before running the motor."""
         for source, force in (("automatic", False), ("website", False),
                               ("automatic", True)):
@@ -87,6 +87,16 @@ assert not {'board', 'adafruit_mlx90393', 'RPi.GPIO'} & sys.modules.keys()
                 controller.close_door(source=source, force=force)
                 self.assertEqual(events.mock_calls,
                                  [call.check(), call.motor.trig(True), call.motor.trig(False)])
+
+    def test_startup_lowers_without_camera_check(self):
+        """Homing establishes closed state even when the camera is unavailable."""
+        controller = self.make_door()
+        controller.close_check.side_effect = TimeoutError("phone offline")
+        controller.home_door()
+        controller.close_check.assert_not_called()
+        self.assertFalse(controller.open)
+        self.assertEqual(controller.motor.trig.call_args_list,
+                         [call(True), call(False)])
 
     def test_failed_check_keeps_open_and_retries_with_another_photo(self):
         """Blocked, unavailable, and invalid results never energize the motor."""
@@ -137,7 +147,7 @@ assert not {'board', 'adafruit_mlx90393', 'RPi.GPIO'} & sys.modules.keys()
         controller.close_check.side_effect = capture
         controller.close_door(source="website")
         controller.motor.trig.assert_not_called()
-        self.assertFalse(controller.website_closed)
+        self.assertFalse(controller.website_override == "closed")
 
     def test_schedule_start_during_capture_prevents_close(self):
         """Honor a schedule boundary crossed while waiting for a photo."""
@@ -221,7 +231,7 @@ assert not {'board', 'adafruit_mlx90393', 'RPi.GPIO'} & sys.modules.keys()
         controller.open = True
         controller.close_door(source="website")
         self.assertFalse(controller.open)
-        self.assertTrue(controller.website_closed)
+        self.assertTrue(controller.website_override == "closed")
         controller.motor.reset_mock()
         controller.open_door_from_magnet()
         controller.open_door_from_beam()
@@ -231,11 +241,22 @@ assert not {'board', 'adafruit_mlx90393', 'RPi.GPIO'} & sys.modules.keys()
         controller.motor.trig.assert_not_called()
         self.exit_process.assert_not_called()
 
+    def test_website_open_holds_past_minimum_time(self):
+        """Manual Open prevents automatic closing until the hold is replaced."""
+        controller = self.make_door()
+        controller.open_door(source="website")
+        self.now += 3600
+        controller.update_door_state()
+        controller.close_door()
+        controller.close_check.assert_not_called()
+        self.assertTrue(controller.open)
+        self.assertEqual(controller.website_override, "open")
+
     def test_website_open_clears_close_override(self):
         controller = self.make_door()
         controller.close_door(source="website")
         controller.open_door(source="website")
-        self.assertFalse(controller.website_closed)
+        self.assertFalse(controller.website_override == "closed")
         self.assertTrue(controller.open)
         self.assertEqual(controller.motor.trig.call_args_list, [call(True), call(False)])
 
@@ -245,7 +266,7 @@ assert not {'board', 'adafruit_mlx90393', 'RPi.GPIO'} & sys.modules.keys()
         controller.close_door(source="website")
         self.now = 8*3600
         controller.update_door_state()
-        self.assertFalse(controller.website_closed)
+        self.assertFalse(controller.website_override == "closed")
         self.assertTrue(controller.open)
 
     def test_next_schedule_end_clears_manual_close_and_restores_sensors(self):
@@ -254,7 +275,7 @@ assert not {'board', 'adafruit_mlx90393', 'RPi.GPIO'} & sys.modules.keys()
         controller.close_door(source="website")
         self.now = 18*3600
         controller.update_door_state()
-        self.assertFalse(controller.website_closed)
+        self.assertFalse(controller.website_override == "closed")
         controller.motor.trig.assert_not_called()
         controller.open_door_from_magnet()
         self.assertTrue(controller.open)
@@ -265,7 +286,7 @@ assert not {'board', 'adafruit_mlx90393', 'RPi.GPIO'} & sys.modules.keys()
         controller.close_door(source="website")
         self.now = 86400
         controller.update_door_state()
-        self.assertTrue(controller.website_closed)
+        self.assertTrue(controller.website_override == "closed")
         controller.motor.trig.assert_not_called()
 
     def test_skipped_schedule_boundaries_still_expire_manual_close(self):
@@ -274,7 +295,7 @@ assert not {'board', 'adafruit_mlx90393', 'RPi.GPIO'} & sys.modules.keys()
         controller.close_door(source="website")
         self.now += 86400
         controller.update_door_state()
-        self.assertFalse(controller.website_closed)
+        self.assertFalse(controller.website_override == "closed")
         self.assertTrue(controller.open)
 
     def test_website_close_at_boundary_overrides_that_schedule_period(self):
@@ -283,7 +304,7 @@ assert not {'board', 'adafruit_mlx90393', 'RPi.GPIO'} & sys.modules.keys()
         self.now = 8*3600
         controller.close_door(source="website")
         controller.update_door_state()
-        self.assertTrue(controller.website_closed)
+        self.assertTrue(controller.website_override == "closed")
         controller.motor.trig.assert_not_called()
 
     def test_disabled_schedule_keeps_manual_close_across_days(self):
@@ -291,7 +312,7 @@ assert not {'board', 'adafruit_mlx90393', 'RPi.GPIO'} & sys.modules.keys()
         controller.close_door(source="website")
         self.now += 2*86400
         controller.update_door_state()
-        self.assertTrue(controller.website_closed)
+        self.assertTrue(controller.website_override == "closed")
 
     def test_control_loop_updates_then_waits(self):
         controller = self.make_door()
@@ -314,7 +335,7 @@ assert not {'board', 'adafruit_mlx90393', 'RPi.GPIO'} & sys.modules.keys()
 
         with patch.object(self.clock, "sleep", side_effect=request_close_during_sleep):
             controller.open_door()
-        self.assertTrue(controller.website_closed)
+        self.assertTrue(controller.website_override == "closed")
         self.assertTrue(controller.open)
         self.assertEqual(controller.motor.trig.call_args_list, [call(True), call(False)])
 
@@ -326,9 +347,9 @@ assert not {'board', 'adafruit_mlx90393', 'RPi.GPIO'} & sys.modules.keys()
     def test_new_controller_has_no_website_override(self):
         controller = self.make_door()
         controller.close_door(source="website")
-        self.assertFalse(self.make_door().website_closed)
+        self.assertFalse(self.make_door().website_override == "closed")
 
-    def test_startup_can_home_door_during_schedule(self):
+    def test_forced_close_can_override_schedule(self):
         self.now = 12*3600
         controller = self.make_door(keep_open_start="08:00", keep_open_end="18:00")
         controller.open = True
@@ -373,25 +394,18 @@ assert not {'board', 'adafruit_mlx90393', 'RPi.GPIO'} & sys.modules.keys()
                     self.assertEqual(door.close_door.called,
                                      not active and age >= 8)
 
-    def test_maximum_open_timeout_exits_only_after_500_seconds(self):
-        for elapsed in (499, 500, 500.1):
+    def test_activity_keeps_door_open_without_timeout_restart(self):
+        """Long-running activity must not restart the controller or close the door."""
+        for elapsed in (499, 500, 501, 3600):
             with self.subTest(elapsed=elapsed):
-                self.exit_process.reset_mock()
-                door = self.make_door()
-                door.open = True
-                door.open_time = self.now - elapsed
-                door.sensor.magnet = True
-                door.close_door = Mock()
-                if elapsed > 500:
-                    with self.assertRaises(StopLoop):
-                        door.update_door_state()
-                else:
-                    door.update_door_state()
-                door.close_door.assert_not_called()
-                if elapsed > 500:
-                    self.exit_process.assert_called_once_with(1)
-                else:
-                    self.exit_process.assert_not_called()
+                controller = self.make_door()
+                controller.open = True
+                controller.open_time = self.now - elapsed
+                controller.sensor.magnet = True
+                controller.close_door = Mock()
+                controller.update_door_state()
+                controller.close_door.assert_not_called()
+                self.exit_process.assert_not_called()
 
     def test_closed_or_locked_door_is_not_automatically_closed(self):
         for opened, locked in ((False, False), (True, True)):
@@ -413,6 +427,7 @@ assert not {'board', 'adafruit_mlx90393', 'RPi.GPIO'} & sys.modules.keys()
         self.assertEqual(events.mock_calls, [
             call.direction.trig(True), call.motor.trig(True), call.sleep(13),
             call.motor.trig(False), call.sleep(3)])
+        door.close_check.assert_not_called()
         self.assertTrue(door.open)
         self.assertFalse(door.lock)
         self.assertEqual(door.open_time, 1016)

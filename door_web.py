@@ -53,14 +53,14 @@ def start_server(door, host="0.0.0.0", port=8080):
 <style>body{{font:20px sans-serif;max-width:24em;margin:3em auto;padding:1em}}
 button{{font:inherit;padding:.7em 1.4em;margin-right:.5em}}</style>
 <h1>Cat door</h1><p>{state}</p>
-<p>{"Kept closed by website override" if door.website_closed else "Automatic control"}</p>
+<p>{"Website hold: " + door.website_override if door.website_override else "Automatic control"}</p>
 <p>Daily keep-open: {door.schedule_description()} (Pi local time).</p>
 <form method="post">
 <input type="hidden" name="token" value="{token}">
 <button formaction="/open">Open</button>
 <button formaction="/close">Close</button>
-</form><p>Close keeps the door closed, overriding the schedule and sensors,
-until the next schedule start/end, Open is clicked, or the controller restarts.</p>
+</form><p>Open and Close hold the selected state until the next website command,
+schedule start/end, or controller restart. Close requires a clear camera check.</p>
 <p><button type="button" id="take-photo">Take photo (Pull mode)</button></p>
 <p id="camera-result"></p>
 <p><button type="button" id="run-inference">Run inference</button></p>
@@ -246,6 +246,9 @@ document.getElementById('take-photo').onclick = async function() {{
                     self.send_error(403)
                     return
             if self.path == "/camera/inference":
+                if door.lock:
+                    self.send_json({"error": "Wait for the door to stop moving before running inference."}, 409)
+                    return
                 try:
                     clear_to_close = door.close_check() is True
                 except Exception as error:
@@ -267,7 +270,8 @@ document.getElementById('take-photo').onclick = async function() {{
                 door.close_door(source="website")
             if is_json:
                 response = json.dumps({"open": bool(door.open), "busy": door.lock,
-                                       "keep_closed": door.website_closed}).encode()
+                                       "keep_closed": door.website_override == "closed",
+                                       "keep_open": door.website_override == "open"}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(response)))

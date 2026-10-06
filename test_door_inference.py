@@ -21,7 +21,7 @@ class InferenceTests(unittest.TestCase):
                     patch.object(door_inference, "run_inference", return_value=False) as inference:
                 self.assertFalse(door_inference.check_before_close())
                 capture.assert_called_once_with()
-                inference.assert_called_once_with(b"requested photo")
+                inference.assert_called_once_with(b"requested photo", log_message=print)
 
     def test_capture_failure_does_not_run_inference(self):
         """Missing captures cannot fall back to an old photo."""
@@ -35,7 +35,7 @@ class InferenceTests(unittest.TestCase):
         """Pass the requested bytes to the model and reject obstructions or unknown labels."""
         for label in ("obstructed", "unobstructed", "unknown"):
             with self.subTest(label=label), patch.object(door_inference, "_get_classifier") as get_model:
-                get_model.return_value.predict.return_value = {"label": label}
+                get_model.return_value.predict.return_value = {"label": label, "obstructed_score": 0.25, "threshold": 0.15}
                 self.assertEqual(door_inference.run_inference(b"photo"), label == "unobstructed")
                 image = get_model.return_value.predict.call_args.args[0]
                 self.assertEqual(image.getvalue(), b"photo")

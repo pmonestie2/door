@@ -1,28 +1,25 @@
 {
-  "normalization": "equalize",
-  "size": 384,
-  "pooling": "avg2",
-  "epoch": 5,
-  "threshold": 0.1991468444466591,
   "misses": 0,
   "false_alarms": 0,
   "training_errors": 0,
-  "min_obstructed": 0.2097470760345459,
-  "max_clear": 0.18854661285877228,
+  "threshold": 0.8172647356987,
+  "min_obstructed": 0.934819757938385,
+  "max_clear": 0.582404613494873,
+  "normalized_gap": 1.6148657589727782,
+  "seed": 7,
+  "learning_rate": 0.003,
+  "weight_decay": 0.1,
+  "label_smoothing": 0.1,
+  "epoch": 10,
+  "normalization": "rgb",
+  "size": 384,
+  "pooling": "avg2",
   "training_fit": {
     "obstructed_detected": 9,
     "obstructed_missed": 0,
-    "clear_correct": 68,
+    "clear_correct": 74,
     "clear_false_alarm": 0
   },
-  "validation": {
-    "obstructed_detected": 10,
-    "obstructed_missed": 0,
-    "clear_correct": 39,
-    "clear_false_alarm": 0
-  },
-  "validation_use": "Model and threshold selection; not an independent test set.",
-  "model_sha256": "6d5a4e8a6f86f95b76f740a19f5e3a06383017b642bf51e808da4b793d4c8e54",
   "training_files": [
     "/Users/pierre/Documents/code/CATDOOR_TRAINING/samples/obstructed/20261005T221122812173Z_6adc39c8.jpg",
     "/Users/pierre/Documents/code/CATDOOR_TRAINING/samples/obstructed/20261005T221132771689Z_5e98cf82.jpg",
@@ -100,8 +97,20 @@
     "/Users/pierre/Documents/code/CATDOOR_TRAINING/samples/unobstructed/20261005T221242921876Z_caea90ff.jpg",
     "/Users/pierre/Documents/code/CATDOOR_TRAINING/samples/unobstructed/20261005T221248015761Z_2c81bcca.jpg",
     "/Users/pierre/Documents/code/CATDOOR_TRAINING/samples/unobstructed/20261005T221252950661Z_48cb847f.jpg",
-    "/Users/pierre/Documents/code/CATDOOR_TRAINING/samples/unobstructed/20261005T223040655500Z_26e4d279.jpg"
+    "/Users/pierre/Documents/code/CATDOOR_TRAINING/samples/unobstructed/20261005T223040655500Z_26e4d279.jpg",
+    "/Users/pierre/Documents/code/CATDOOR_TRAINING/samples/unobstructed/20261006T004912061190Z_c4fe7d5e.jpg",
+    "/Users/pierre/Documents/code/CATDOOR_TRAINING/samples/unobstructed/20261006T004920238295Z_ecd87633.jpg",
+    "/Users/pierre/Documents/code/CATDOOR_TRAINING/samples/unobstructed/20261006T004928207546Z_8c346513.jpg",
+    "/Users/pierre/Documents/code/CATDOOR_TRAINING/samples/unobstructed/20261006T024314866404Z_4e146b0d.jpg",
+    "/Users/pierre/Documents/code/CATDOOR_TRAINING/samples/unobstructed/20261006T024426379903Z_d464fc74.jpg",
+    "/Users/pierre/Documents/code/CATDOOR_TRAINING/samples/unobstructed/20261006T030128749778Z_238acc04.jpg"
   ],
+  "validation": {
+    "obstructed_detected": 10,
+    "obstructed_missed": 0,
+    "clear_correct": 43,
+    "clear_false_alarm": 0
+  },
   "validation_files": [
     "/Users/pierre/Documents/code/CATDOOR_TRAINING/validation/obstructed/20261005T223030821558Z_8c2b602d.jpg",
     "/Users/pierre/Documents/code/CATDOOR_TRAINING/validation/obstructed/20261005T223035623761Z_4d44c284.jpg",
@@ -151,6 +160,67 @@
     "/Users/pierre/Documents/code/CATDOOR_TRAINING/validation/unobstructed/20261005T233609139242Z_17d8771d.jpg",
     "/Users/pierre/Documents/code/CATDOOR_TRAINING/validation/unobstructed/20261005T233618687552Z_afd09898.jpg",
     "/Users/pierre/Documents/code/CATDOOR_TRAINING/validation/unobstructed/20261005T233632006896Z_aef56c6d.jpg",
-    "/Users/pierre/Documents/code/CATDOOR_TRAINING/validation/unobstructed/20261005T233934144314Z_8627d19a.jpg"
-  ]
+    "/Users/pierre/Documents/code/CATDOOR_TRAINING/validation/unobstructed/20261005T233934144314Z_8627d19a.jpg",
+    "/Users/pierre/Documents/code/CATDOOR_TRAINING/validation/unobstructed/20261006T004936121352Z_711c1bd2.jpg",
+    "/Users/pierre/Documents/code/CATDOOR_TRAINING/validation/unobstructed/20261006T004944155596Z_9c369e33.jpg",
+    "/Users/pierre/Documents/code/CATDOOR_TRAINING/validation/unobstructed/20261006T024906432601Z_e82ce3e7.jpg",
+    "/Users/pierre/Documents/code/CATDOOR_TRAINING/validation/unobstructed/20261006T025411912185Z_698d0532.jpg"
+  ],
+  "validation_use": "Repeated hyperparameter and threshold selection; not independent testing.",
+  "selection_metric": "Maximize validation logit gap divided by classifier weight-difference norm, after minimizing classification errors; invariant to positive uniform logit scaling.",
+  "model_sha256": "ea5811f8c87ec3267c99b6d120ea57d2be92fe7f78a1c1b49dae2d4ad59dd602",
+  "perturbation_check": {
+    "previous": {
+      "original": {
+        "misses": 0,
+        "false_alarms": 0
+      },
+      "brightness_0.8": {
+        "misses": 1,
+        "false_alarms": 0
+      },
+      "brightness_1.2": {
+        "misses": 0,
+        "false_alarms": 1
+      },
+      "contrast_0.8": {
+        "misses": 1,
+        "false_alarms": 0
+      },
+      "contrast_1.2": {
+        "misses": 0,
+        "false_alarms": 1
+      },
+      "jpeg_75": {
+        "misses": 0,
+        "false_alarms": 0
+      }
+    },
+    "candidate": {
+      "original": {
+        "misses": 0,
+        "false_alarms": 0
+      },
+      "brightness_0.8": {
+        "misses": 1,
+        "false_alarms": 0
+      },
+      "brightness_1.2": {
+        "misses": 0,
+        "false_alarms": 0
+      },
+      "contrast_0.8": {
+        "misses": 0,
+        "false_alarms": 0
+      },
+      "contrast_1.2": {
+        "misses": 0,
+        "false_alarms": 0
+      },
+      "jpeg_75": {
+        "misses": 0,
+        "false_alarms": 0
+      }
+    }
+  }
 }

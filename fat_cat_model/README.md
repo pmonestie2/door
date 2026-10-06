@@ -1,3 +1,5 @@
+Current deployed model: RGB, 384×384, 2×2 average pooling; threshold 0.012446273351088166. Retrained with the two debris images; 51/51 tuning images pass. See `model-report.json`. Older deployment notes below are historical.
+
 ## Deployed model (2026-10-05)
 
 `model.pt` and `inference.py` now use grayscale histogram equalization, 384×384 letterboxing, and 2×2 average pooling. The checkpoint supplies all inference settings, including threshold 0.1991468444466591. It passed all 49 tuning images (10 obstructed, 39 clear). See `model-report.json` for details. This is not independent test performance. The prior model and inference code are retained in `backups/`.

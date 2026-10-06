@@ -106,7 +106,8 @@ public final class CameraService extends Service {
             running = true;
             generation++;
             status = pull ? "Pull: waiting for Pi (screen may sleep)" : "Push: every " + (intervalMillis / 1000) + " seconds (screen may sleep)";
-            checkCameraLight();
+            updateCameraLight();
+            notifyScreen();
             if (pull) waitForCommand(generation); else pushTick(generation);
         } catch (Exception error) { stopCapture("Could not start: " + error.getMessage()); }
     }
@@ -118,7 +119,7 @@ public final class CameraService extends Service {
         busy = awaitingFrame = false;
         handler.removeCallbacksAndMessages(null);
         if (client != null) { client.cancel(); client = null; }
-        if (camera != null) { camera.setPreviewCallback(null); camera.release(); camera = null; }
+        if (camera != null) { updateCameraLight(); camera.setPreviewCallback(null); camera.release(); camera = null; }
         if (surface != null) { surface.release(); surface = null; }
         if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();
         if (cpuLock != null && cpuLock.isHeld()) cpuLock.release();
@@ -172,6 +173,7 @@ public final class CameraService extends Service {
         if (parameters.getSupportedFocusModes().contains(Camera.Parameters.FOCUS_MODE_CONTINUOUS_PICTURE))
             parameters.setFocusMode(Camera.Parameters.FOCUS_MODE_CONTINUOUS_PICTURE);
         camera.setParameters(parameters);
+        updateCameraLight();
         surface = new SurfaceTexture(0);
         camera.setPreviewTexture(surface);
         camera.setErrorCallback((error, ignored) -> stopCapture("Camera error " + error + ". Reopen the app and tap Start."));
@@ -212,16 +214,26 @@ public final class CameraService extends Service {
         handler.postDelayed(() -> { if (running && generation == run && pull) waitForCommand(run); }, 2000);
     }
 
-    /** Take a full-resolution photo, then restart preview for the next request. */
+    /** Illuminate the preview first so nighttime exposure can settle before capture. */
     private void capture(String requestId, int run) {
         if (!running || generation != run || busy) return;
-        updateCameraLight();
         busy = awaitingFrame = true;
+        boolean illuminated = updateCameraLight();
+        notifyScreen();
         int capture = ++captureSequence;
+        if (illuminated) handler.postDelayed(() -> takePhoto(requestId, run, capture), 1500);
+        else takePhoto(requestId, run, capture);
+    }
+
+    /** Take the settled photo, keeping the light on until its JPEG is delivered. */
+    private void takePhoto(String requestId, int run, int capture) {
+        if (!running || generation != run || captureSequence != capture || !awaitingFrame) return;
         try {
             camera.takePicture(null, null, (data, source) -> {
                 if (!running || generation != run || captureSequence != capture || !awaitingFrame) return;
                 awaitingFrame = false;
+                updateCameraLight();
+                notifyScreen();
                 try { source.startPreview(); }
                 catch (RuntimeException error) { stopCapture("Camera preview restart failed: " + error.getMessage()); return; }
                 SimpleDateFormat formatter = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US);
@@ -259,6 +271,7 @@ public final class CameraService extends Service {
             });
         } catch (RuntimeException error) {
             busy = awaitingFrame = false;
+            updateCameraLight();
             if (pull) retry(run, "Camera capture failed: " + error.getMessage());
             else { status = "Camera capture failed: " + error.getMessage(); notifyScreen(); }
             return;
@@ -321,26 +334,22 @@ public final class CameraService extends Service {
         } finally { resized.recycle(); }
     }
 
-    /** Check the light schedule even with the screen off and while awaiting Pull commands. */
-    private void checkCameraLight() {
-        if (!running) return;
-        if (!awaitingFrame) updateCameraLight();
-        notifyScreen();
-        handler.postDelayed(this::checkCameraLight, 30000);
-    }
-
-    /** Apply continuous torch illumination from 18:00 inclusive until 08:00 exclusive. */
-    private void updateCameraLight() {
+    /** Illuminate only a nighttime capture, including its exposure-settling period.
+     * Returns:
+     *     boolean: Whether the camera torch is enabled for this capture.
+     */
+    private boolean updateCameraLight() {
         int hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY);
-        boolean night = hour >= 18 || hour < 8;
+        boolean illuminate = running && awaitingFrame && (hour >= 18 || hour < 8);
         try {
             Camera.Parameters parameters = camera.getParameters();
             List<String> modes = parameters.getSupportedFlashModes();
-            String desired = night ? Camera.Parameters.FLASH_MODE_TORCH : Camera.Parameters.FLASH_MODE_OFF;
-            if (modes == null || !modes.contains(desired)) { light = "Camera light unavailable"; return; }
+            String desired = illuminate ? Camera.Parameters.FLASH_MODE_TORCH : Camera.Parameters.FLASH_MODE_OFF;
+            if (modes == null || !modes.contains(desired)) { light = "Camera light unavailable"; return false; }
             if (!desired.equals(parameters.getFlashMode())) { parameters.setFlashMode(desired); camera.setParameters(parameters); }
-            light = "Camera light: " + (night ? "ON" : "OFF") + " · 18:00–08:00, phone local time";
-        } catch (RuntimeException error) { light = "Camera light failed: " + error.getMessage(); }
+            light = "Camera light: " + (illuminate ? "ON for photo" : "OFF") + " · photo light 18:00–08:00";
+        } catch (RuntimeException error) { light = "Camera light failed: " + error.getMessage(); return false; }
+        return illuminate;
     }
 
     /** Publish state only to an attached, visible screen. */

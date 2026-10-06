@@ -102,12 +102,16 @@ with `-p` instead. This APK was built that way and copied back here.
 
 ## Overnight light
 
-The rear camera LED stays on continuously from **18:00 through 07:59**, using
-phone local time, while a capture run is active, including with the screen off. It switches off at **08:00**.
-This works in both Push and Pull modes. The
-schedule is checked every thirty seconds and before each capture. Pressing Stop releases the camera and turns the light off; leaving the app does not. The UI reports whether the
-light is on, off, or unavailable. Preview captures need continuous torch mode,
-not a still-photo flash. Make sure the phone's clock/timezone is correct.
+The rear camera LED turns on only while taking a photo from **18:00 through
+07:59**, using phone local time. Version 1.5 gives the lit preview **1.5 seconds**
+to settle its exposure before taking the photo, then keeps the light on until the
+JPEG arrives. It turns off before
+processing or uploading, and stays off while waiting for Pull requests or between
+Push captures. Stop, capture errors, and capture timeout also turn it off. This
+works with the screen off. Door position does not control the light; a requested
+nighttime photo can use it whether the door is raised or lowered.
+
+Version 1.4 fixes the idle torch remaining on overnight.
 
 Version 1.1 changes the default server to `http://pi3:8080` and migrates the old
 `http://pi3.local:8080` default. Other saved server addresses are preserved.

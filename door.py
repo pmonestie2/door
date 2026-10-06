@@ -9,8 +9,8 @@ import signal
 import cProfile
 import itertools
 import os
-from functools import wraps
-from door_inference import check_before_close
+from functools import partial, wraps
+from door_inference import check_before_close, warm_up_model
 
 MAGNET_DETECT_LG_TYPE = 'magnet_detect'
 
@@ -19,8 +19,10 @@ MAGNET_LG_TYPE = 'magnet'
 LOG_FILE_PATH = "/home/pi/door.log"
 # Daily keep-open range in the Pi's local time (24-hour HH:MM).
 # An end time <= the start time disables scheduled opening.
-KEEP_OPEN_START = "07:20"
+KEEP_OPEN_START = "21:20"
 KEEP_OPEN_END = "18:00"
+OPEN_MIN_TIME = 20  # Seconds after opening and settling before automatic closing.
+CLOSE_CHECK_INTERVAL = 10  # Seconds after inference before requesting another closing photo.
 log_file = None
 
 def configure_logging(path=LOG_FILE_PATH):
@@ -309,15 +311,14 @@ class Door:
         self.keep_open_start = self.parse_schedule_time(keep_open_start)
         self.keep_open_end = self.parse_schedule_time(keep_open_end)
         self.schedule_event = self.latest_schedule_event()
-        self.website_closed = False
+        self.website_override = None
         self.lock=False
         self.movement_lock = threading.Lock()
-        self.open_min_time = 90
-        self.open_max_time = 500
+        self.open_min_time = OPEN_MIN_TIME
         self.cool_down_time = 5
         self.open_time = self.clock.time()
         self.closed_time = self.clock.time()
-        self.open = None
+        self.open = None  # Startup lowering establishes the closed position.
         self.sensor = sensor
         self.sensor.on_magnet_detected = self.open_door_from_magnet
         self.thread = threading.Thread(target=self.run_control_loop)
@@ -375,7 +376,7 @@ class Door:
         return today - timedelta(days=1), self.keep_open_end
 
     def update_schedule_state(self):
-        """Expire manual Close at a schedule boundary and reset timers at its end.
+        """Expire the website override at a schedule boundary and reset timers at its end.
 
         Returns:
             bool: Whether the current schedule period calls for keeping the door open.
@@ -383,7 +384,7 @@ class Door:
         event = self.latest_schedule_event()
         if event != self.schedule_event:
             self.schedule_event = event
-            self.website_closed = False
+            self.website_override = None
             if event is not None and event[1] == self.keep_open_end:
                 self.open_time = self.clock.time()
         return event is not None and event[1] == self.keep_open_start
@@ -392,15 +393,15 @@ class Door:
         """Request closing; website Close overrides sensors until the next schedule event."""
         if source == "website":
             self.update_schedule_state()
-            self.website_closed = True
+            self.website_override = "closed"
         self._close_door(force, source)
 
     @serialize_movement
     def _close_door(self, force=False, source="automatic"):
-        """Run a closing cycle, honoring website override or forced startup homing."""
-        if not self.open or self.lock:
+        """Run a closing cycle, honoring website override or a forced schedule bypass."""
+        if not self.open or self.lock or self.website_override == "open":
             return
-        if not force and not self.website_closed and self.is_scheduled_open():
+        if not force and self.website_override != "closed" and self.is_scheduled_open():
             return
         if self.clock.time() < self.next_close_check:
             return
@@ -412,7 +413,7 @@ class Door:
         except Exception as error:
             log("door remains open: photo/inference check failed: %s" % error)
             allowed = False
-        self.next_close_check = self.clock.time() + 5
+        self.next_close_check = self.clock.time() + CLOSE_CHECK_INTERVAL
         if allowed is not True:
             log("door remains open: photo/inference check did not allow closing")
             return
@@ -420,11 +421,20 @@ class Door:
         scheduled_open = self.update_schedule_state()
         if open_request_version != self.open_request_version:
             return
-        if not force and not self.website_closed:
+        if not force and self.website_override != "closed":
             if scheduled_open or self.has_recent_activity():
                 return
             if self.open_time != open_time and self.clock.time() - self.open_time <= self.open_min_time:
                 return
+        self._lower_door(source)
+
+    @serialize_movement
+    def home_door(self):
+        """Lower the door at startup to establish closed position without a camera check."""
+        self._lower_door("startup")
+
+    def _lower_door(self, source):
+        """Run the lowering motor cycle while the caller holds the movement lock."""
         log("door closing")
         silence(MAGNET_LG_TYPE)
         silence(MAGNET_DETECT_LG_TYPE)
@@ -456,7 +466,7 @@ class Door:
         if self.analytics is not None:
             try:
                 self.analytics.magnet(self.clock.time(),
-                                      blocked=self.lock or not self.open or self.website_closed)
+                                      blocked=self.lock or not self.open or self.website_override == "closed")
             except Exception as error:
                 log("analytics unavailable: %s" % error)
         log_interval(MAGNET_LG_TYPE, "magnet detected", interval=5, count = 2, to_file=True)
@@ -464,17 +474,17 @@ class Door:
 
 
     def open_door(self, time_to_open=13, source="magnet"):
-        """Request opening; website requests clear the keep-closed override."""
+        """Request opening; website requests hold open until the next schedule event."""
         if source == "website":
             self.open_request_version += 1
             self.update_schedule_state()
-            self.website_closed = False
+            self.website_override = "open"
         self._open_door(time_to_open, source)
 
     @serialize_movement
     def _open_door(self, time_to_open=13, source="magnet"):
         """Run the opening cycle, then start the normal minimum-open timer."""
-        if self.website_closed or self.open or self.lock:
+        if self.website_override == "closed" or self.open or self.lock:
             return
         log("door opening source =%s" %source)
         silence(MAGNET_LG_TYPE)
@@ -514,12 +524,15 @@ class Door:
         return magnet_active or beam_active
 
     def update_door_state(self):
-        """Apply schedule changes, then manual Close, scheduled opening, or normal closing."""
+        """Apply schedule changes, website holds, scheduled opening, or normal closing."""
         scheduled_open = self.update_schedule_state()
         if self.lock:
             return
-        if self.website_closed:
+        if self.website_override == "closed":
             self.close_door()
+            return
+        if self.website_override == "open":
+            self.open_door(source="website")
             return
         if scheduled_open:
             self.open_door(source="schedule")
@@ -532,9 +545,6 @@ class Door:
             return
         if not self.has_recent_activity():
             self.close_door()
-        elif elapsed > self.open_max_time:
-            log("exiting, open time too long")
-            self.exit_process(1)
         else:
             log_interval("door_close", "door cannot close: recent sensor activity",
                          interval=5, to_file=True)
@@ -577,18 +587,23 @@ def main():
         door = Door(sensor=sensor, motor=Relay(27, inverted=True, gpio=GPIO),
                     direction=Relay(17, gpio=GPIO),
                     keep_open_start=KEEP_OPEN_START, keep_open_end=KEEP_OPEN_END,
-                    analytics=analytics)
+                    analytics=analytics,
+                    close_check=partial(check_before_close, log_message=log))
+        threading.Thread(target=warm_up_model, args=(log,),
+                         name="model-warmup", daemon=True).start()
+        log("lowering door at startup without inference")
+        door.home_door()
         from door_web import start_server
         try:
             start_server(door)
             log("web controls listening on port 8080")
         except OSError as error:
             log("web controls unavailable: %s" % error)
-        log("checking phone before startup closing and starting door thread")
-        door.open = True
-        door.close_door(force=True)
         door.thread.start()
         door.sensor.thread.start()
+        # Keep Python out of shutdown while workers may lazily import PyTorch.
+        door.thread.join()
+        door.sensor.thread.join()
 
 
 if __name__ == '__main__':

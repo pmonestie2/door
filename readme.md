@@ -10,13 +10,11 @@ After starting `python3 door.py`, open `http://<pi-ip-address>:8080/` on your
 local network. The page shows the door state and Open/Close buttons. No extra
 packages are required; deploy `door_web.py` alongside `door.py`.
 
-Close keeps the door closed, overriding the daily schedule, minimum-open timer,
-and sensor triggers. This override lasts until the next schedule start/end,
-Open is clicked, or the controller process restarts (including a reboot).
-With scheduling disabled, only Open or a restart clears it. If movement or settling is underway,
-closing is deferred until it finishes. Open clears the override and requests a
-normal opening cycle; its movement request is ignored if the motor is busy.
-The page shows whether the override is active; use Refresh status to update it.
+Open and Close hold the selected state, overriding automatic timers and sensor
+triggers, until the next website command, schedule boundary, or process restart.
+With scheduling disabled, the hold lasts until another website command or restart.
+Close still requires a clear camera check. Commands during movement are retained
+and applied after movement finishes. The page displays the current hold.
 
 There is no login: anyone who can reach port 8080 can operate the door. Keep it
 on a trusted local network. If the port is occupied, the controller logs the
@@ -61,28 +59,34 @@ and their JSON metadata under `camera_images/`. Push uploads accumulate until th
 
 ## Photo check before closing
 
-Every closing cycle, including website Close and forced startup closing, first
+Every normal closing cycle from an open state, including website Close, first
 requests a fresh phone photo through the existing Pull protocol. Keep the phone
 app started in **Pull** mode. Deploy `pull_photo.py`, `door_camera.py`, and
-`door_inference.py` alongside the controller and web module. The web server starts
-before the startup check so the phone can receive the request and upload its photo.
+`door_inference.py` alongside the controller and web module. Opening never requests
+a photo or runs inference. On every process start (including reboot), the controller
+lowers the door for the full motor cycle without requesting a photo or running
+inference. This establishes the closed position before starting web controls and
+sensor/control threads. Subsequent closing cycles require the camera check.
 
 `door_inference.py` reads the saved image matching that capture request and passes
 its bytes to `run_inference(image)`. The trained classifier in `fat_cat_model/`
-is loaded once and reused, with the threshold stored in `model.pt`. Only an
+is loaded once and reused, with the threshold stored in `model.pt`. A background
+thread warms it at startup with a synthetic image while the door homes. The warm-up
+result is discarded; it requests no phone photo and does not affect movement.
+An early real inference request waits on the same model lock. Readiness or failure
+is logged. Only an
 `unobstructed` result permits closing; obstructions and errors keep the door open.
 
 The website's **Run inference** button requests a fresh photo and displays the
 model result without moving the door or changing its override. The same action is
 available as `POST /camera/inference` with JSON `{}`; it returns `clear_to_close`
-and `mock: false`, or an error if capture or inference fails.
+and `mock: false`, or an error if capture or inference fails. Website inference works with the door open or closed; requests
+are rejected only while it is moving or settling.
 
 A missing phone, timed-out or busy capture request, unreadable photo, or inference
 error leaves the door open. Checks can wait approximately 35 seconds for a photo;
 failed or blocked checks retry on a later eligible control-loop iteration, with
-at least five seconds after each check. No cached photo is used. If startup capture
-fails, startup homing is skipped and the controller proceeds assuming the door is
-open; this is still commanded state, not measured position.
+at least five seconds after each check. No cached photo is used.
 
 After capture and inference, automatic closing rechecks sensor activity and the
 schedule. Website Close still overrides sensors and the schedule, but requires
@@ -129,7 +133,7 @@ the script. The current settings are `"07:20"` and `"18:00"`, in the Raspberry P
 time, using 24-hour `HH:MM` format. The page displays the configured range.
 
 During this daily range the controller opens the door without needing a magnet
-and keeps it open, bypassing the 500-second timeout. Website Close takes priority
+and keeps it open. Website Close takes priority
 until the next schedule boundary. At the start boundary, any manual Close override
 is cleared and the door opens. At 18:00, the override is cleared and
 normal behavior resumes with a fresh 90-second minimum-open timer and the usual
@@ -159,7 +163,7 @@ files, registering signal handlers, or loading Raspberry Pi libraries. Tests
 pass fake GPIO, magnetic readings, relays, a clock, and a process-exit function
 into constructors. No background threads are started and no motor is operated.
 Tests cover import isolation, opening/closing sequences, relay polarity, the
-90-second minimum open time, the 500-second activity-blocked exit timeout,
+90-second minimum open time, continued opening while sensor activity persists,
 recent activity, calibration, and magnetic detection thresholds.
 
 These regression tests describe current behavior, including exiting after the
@@ -195,3 +199,6 @@ and process-exit functions.
 5. You can customize the parameters in the code, such as the pin assignments, logging intervals, and sensor settings, to suit your specific requirements.
 
 **Note**: This code is intended as a reference and may require modification to work with your specific hardware setup. Please refer to the documentation of the hardware components and libraries for detailed usage instructions.
+
+Each real inference logs its predicted label, obstruction score, and decision threshold
+to both `/home/pi/door.log` and `/home/pi/door-script.log`, including website checks. Synthetic startup warm-up results are discarded.
