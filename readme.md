@@ -158,10 +158,10 @@ successful tuning does not establish performance on new scenes. Model details,
 limitations, and the command for classifying a saved photo are in the
 [obstruction model documentation](obstruction_model/README.md).
 
-[Training runs on the Mac](training/README.md), with images and generated runs
-under `~/Documents/code/CATDOOR_TRAINING/`. Training does not replace the deployed
-weights automatically. A separate [scratch CNN experiment](scratch_cnn/README.md)
-is also included.
+[Training was performed on Mac](training/README.md), with images and generated runs
+under `/CATDOOR_TRAINING/`. Training does not replace the deployed
+weights automatically. A separate [scratch CNN](scratch_cnn/README.md)
+is also included. This actually will be the prod model as "simpler" torch code/architecture.
 
 | Code | Responsibility |
 |---|---|
