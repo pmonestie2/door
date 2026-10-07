@@ -9,7 +9,7 @@ The cat carries a 1$ magnet - The detector, a very cheap magnetic field reader (
 
 A **slight** complication: My cat (we call him bigcat) likes to hang at the door  (see pic below)
 Given the actuator was a cheap, non custom made actuator from amazon, it is very powerfull. So if bigcat starts sleeping in the tunnel (in that case the magnetic field will stabilize) there is no way to know that the door will not "guillotine" the cat...
-Before you ask: cheap IR detector is a pain and don't have, afaik wide view (I tried).
+Before you ask: cheap IR detector is a pain to align and the RPI ones (at least the one I have) don't have enough range (if placed horizontally), or wide field (if palced vertically - I tried.
 
 Solution 2: an old android phone with an app installed on it. Can be piloted by the RPI to take picture before closing the door (when the PI detects no magnetic field change) - On top of that, a custom made, CNN based binary classifier, to detect if there is obstruction on the closing path of the door.
 
